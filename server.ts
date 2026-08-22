@@ -13,7 +13,7 @@ import { Tenant, Customer, Invoice, Product } from "./src/types";
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
   app.use(express.json());
 
@@ -327,14 +327,17 @@ async function startServer() {
     const MUTE = "#545f73";
     const paper = PAPER[inv.paperSize as keyof typeof PAPER] || PAPER["A4 (Standard)"];
     const initials = tenant.initials || tenant.name.slice(0, 2).toUpperCase();
-    const rows = inv.items.map((it: any) => `
+    const rows = inv.items.map((it: any) => {
+      const amt = (it.amount != null && it.amount !== 0) ? it.amount : (Number(it.quantity || 1) * Number(it.unitPrice || 0));
+      return `
       <tr class="item">
         <td>${it.description}</td>
         <td class="ctr">${it.quantity} ${it.sizeUnit || ""}</td>
         <td class="rgt mono">${fmt(it.unitPrice)}</td>
         <td class="ctr mono">${it.taxRate > 0 ? (it.taxRate * 100).toFixed(0) + "%" : "0%"}</td>
-        <td class="rgt mono">${fmt(it.amount)}</td>
-      </tr>`).join("");
+        <td class="rgt mono">${fmt(amt)}</td>
+      </tr>`;
+    }).join("");
     const billLines = [inv.customerAddress, inv.customerPhone && `Tel/WhatsApp: ${inv.customerPhone}`, inv.customerEmail && `Email: ${inv.customerEmail}`, inv.customerTin && `TIN: ${inv.customerTin}`].filter(Boolean).join("<br>");
     const html = `<!doctype html><html><head><meta charset="utf-8"><title>${inv.invoiceNumber} - ${tenant.name}</title>
 <style>
