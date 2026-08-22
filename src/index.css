@@ -54,10 +54,21 @@
 /* Print simulation and styles */
 @media print {
   html, body { margin: 0 !important; padding: 0 !important; width: 100% !important; background: #fff !important; }
-  /* Hide everything except the invoice, using display:none so no layout space is reserved */
-  body > *:not(#root) { display: none !important; }
-  #root, #root > * { display: none !important; }
-  #printable-invoice, #printable-invoice * { display: revert !important; visibility: visible !important; }
+  /* Hide all app chrome WITHOUT collapsing the invoice:
+     push every element except the invoice (and its descendants) off-screen
+     with zero size so they reserve NO layout space (no blank pages). */
+  #root *:not(#printable-invoice):not(#printable-invoice *) {
+    position: absolute !important;
+    left: -99999px !important;
+    top: 0 !important;
+    width: 0 !important;
+    height: 0 !important;
+    overflow: hidden !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    visibility: hidden !important;
+  }
+  /* The invoice itself: pop out of the grid column and fill the page */
   #printable-invoice {
     position: fixed !important;
     inset: 0 !important;
@@ -73,7 +84,8 @@
     border: none !important;
     border-radius: 0 !important;
     background: #fff !important;
-    z-index: 9999 !important;
+    z-index: 2147483647 !important;
+    visibility: visible !important;
     page-break-after: avoid;
     page-break-inside: avoid;
   }
