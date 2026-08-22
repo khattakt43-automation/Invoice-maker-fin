@@ -11,7 +11,26 @@
   </head>
   <body class="bg-[#f8f9ff] text-[#0b1c30] antialiased selection:bg-[#00855a]/20 selection:text-[#006a46]">
     <div id="root"></div>
+    <!-- Mobile hamburger + backdrop (toggled via JS, hidden on desktop) -->
+    <button id="mobile-menu-btn" aria-label="Open menu"
+      class="fixed top-3 left-3 z-[60] lg:hidden flex items-center justify-center w-10 h-10 rounded-xl bg-white shadow-md border border-[#e2e8f0] text-[#0b1c30]">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+    </button>
+    <div id="mobile-backdrop" class="fixed inset-0 z-[55] bg-black/40 hidden lg:hidden"></div>
     <script type="module" src="/src/main.tsx"></script>
+    <script>
+      (function () {
+        function toggle() {
+          document.body.classList.toggle('sidebar-open');
+          var bd = document.getElementById('mobile-backdrop');
+          if (bd) bd.classList.toggle('hidden');
+        }
+        var btn = document.getElementById('mobile-menu-btn');
+        var bd = document.getElementById('mobile-backdrop');
+        if (btn) btn.addEventListener('click', toggle);
+        if (bd) bd.addEventListener('click', toggle);
+      })();
+    </script>
   </body>
 </html>
 
