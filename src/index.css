@@ -1,69 +1,22 @@
-@import "tailwindcss";
-
-@theme {
-  --font-sans: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-  --font-mono: 'JetBrains Mono', monospace;
-  
-  --color-primary: #006a46;
-  --color-primary-container: #00855a;
-  --color-primary-fixed: #8bf8c2;
-  --color-primary-fixed-dim: #6edba7;
-  --color-on-primary: #ffffff;
-  --color-on-primary-container: #f5fff6;
-  
-  --color-surface: #f8f9ff;
-  --color-surface-dim: #cbdbf5;
-  --color-surface-container: #e5eeff;
-  --color-surface-container-low: #eff4ff;
-  --color-surface-container-high: #dce9ff;
-  --color-surface-container-highest: #d3e4fe;
-  --color-surface-container-lowest: #ffffff;
-  
-  --color-on-surface: #0b1c30;
-  --color-on-surface-variant: #3e4942;
-  --color-secondary: #545f73;
-  --color-secondary-container: #d5e0f8;
-  --color-on-secondary-container: #586377;
-  --color-outline: #6e7a72;
-  --color-outline-variant: #bdcac0;
-  
-  --color-inverse-surface: #213145;
-  --color-inverse-on-surface: #eaf1ff;
-  
-  --color-error: #ba1a1a;
-  --color-error-container: #ffdad6;
-  --color-on-error-container: #93000a;
-}
-
-/* Custom scrollbars */
-.custom-scrollbar::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-.custom-scrollbar::-webkit-scrollbar-track {
-  background: transparent;
-}
-.custom-scrollbar::-webkit-scrollbar-thumb {
-  background-color: #bdcac0;
-  border-radius: 9999px;
-}
-.custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background-color: #6e7a72;
-}
-
 /* Print simulation and styles */
 @media print {
   html, body { margin: 0 !important; padding: 0 !important; width: 100% !important; background: #fff !important; }
-  body * {
-    visibility: hidden;
-  }
-  #printable-invoice, #printable-invoice * {
-    visibility: visible;
+  #root *:not(#printable-invoice):not(#printable-invoice *) {
+    position: absolute !important;
+    left: -99999px !important;
+    top: 0 !important;
+    width: 0 !important;
+    height: 0 !important;
+    overflow: hidden !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    visibility: hidden !important;
   }
   #printable-invoice {
-    position: static !important;
-    left: 0;
-    top: 0;
+    position: fixed !important;
+    inset: 0 !important;
+    left: 0 !important;
+    top: 0 !important;
     width: 100% !important;
     max-width: 100% !important;
     min-height: 0 !important;
@@ -73,6 +26,9 @@
     box-shadow: none !important;
     border: none !important;
     border-radius: 0 !important;
+    background: #fff !important;
+    z-index: 2147483647 !important;
+    visibility: visible !important;
     page-break-after: avoid;
     page-break-inside: avoid;
   }
