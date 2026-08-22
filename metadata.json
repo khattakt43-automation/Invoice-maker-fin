@@ -1,0 +1,6 @@
+{
+  "name": "BillLah! - Business Invoicing Portal",
+  "description": "Malaysian Corporate Modern Invoicing & Multi-Tenant Billing Platform with live A4 invoice builder, client ledger, and Super Admin console.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
