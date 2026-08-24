@@ -144,3 +144,27 @@ Verification: full Playwright E2E (no errors) confirmed all 12 points: doc defau
 - Push to GitHub is **blocked**: no `ghp_`/PAT token present in this environment. Code is committed locally (unpushed) — awaiting a classic repo-scoped PAT to push to `khattakt43-automation/Invoice-maker-fin`.
 - WhatsApp live Meta/AI connectivity remains a demo workflow (requires provider credentials); entitlement + usage tracking is real.
 - Admin "Payment Settings" (bank/QR) UI: server route + data model exist (`/api/payment-settings`); a dedicated admin Settings form was not added this round (payment details currently default empty until configured).
+
+---
+
+## 2026-08-24 — Tenant login landing + refresh page retention
+
+User requests:
+1. **Tenant login always lands on Create Invoice** — `handleSignIn` already set `activeTab='create-invoice'`
+   for `business_admin`; now that state is persisted so it survives a refresh too.
+2. **Refresh keeps the user on the same page** — added session persistence:
+
+**Changes (`src/App.tsx`):**
+- `currentRole` / `activeTab` initializers now read the last session from `sessionStorage`
+  (`billah_session_v1`) so a refresh restores the exact page + role the user was on.
+- A `useEffect` re-persists `{role, tenantId, tab}` to `sessionStorage` on every change
+  (navigation, login, role switch, impersonate, invoice open).
+- `loadData` restores the active tenant from the saved `tenantId` (falls back to first tenant).
+- Verified via Playwright: tenant login → Create Invoice; navigating to Customers then refresh
+  keeps the user on Customers (not dashboard); active tenant correctly restored.
+
+**Cleanup:** removed the stray test tenant `NullCur Test Co` (currency:null) directly from
+`data/store.json`. It had become `tenants[0]` and was the broken tenant shown in the user's
+screenshot. First tenant is now `Admin Note Test Co`. (Note: the currency-normalization db fix
+from the reverted round is intentionally NOT reapplied — only the requested login/refresh behavior
+was changed here.)

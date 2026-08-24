@@ -45,8 +45,20 @@ import { playSound } from './utils/sound';
 export function App() {
   // App state
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(true);
-  const [currentRole, setCurrentRole] = useState<UserRole>('business_admin');
-  const [activeTab, setActiveTab] = useState<string>('dashboard');
+  const [currentRole, setCurrentRole] = useState<UserRole>(() => {
+    try {
+      const s = JSON.parse(sessionStorage.getItem('billah_session_v1') || 'null');
+      if (s?.role === 'super_admin' || s?.role === 'business_admin') return s.role;
+    } catch { /* ignore */ }
+    return 'business_admin';
+  });
+  const [activeTab, setActiveTab] = useState<string>(() => {
+    try {
+      const s = JSON.parse(sessionStorage.getItem('billah_session_v1') || 'null');
+      if (s?.tab) return s.tab;
+    } catch { /* ignore */ }
+    return 'dashboard';
+  });
   // Back-context: remembers where an invoice edit was launched from
   const [returnTab, setReturnTab] = useState<string>('invoices');
   const [returnCustomerId, setReturnCustomerId] = useState<string | null>(null);
@@ -95,6 +107,19 @@ export function App() {
   });
   const [toast, setToast] = useState<string | null>(null);
 
+  // --- Session + active-tab persistence (tenant login lands on Create Invoice;
+  //     refresh keeps the user on the same page) ---
+  const SESSION_KEY = 'billah_session_v1';
+  // Persist on any change so a refresh restores the exact page the user was on.
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(
+        SESSION_KEY,
+        JSON.stringify({ role: currentRole, tenantId: activeTenant?.id, tab: activeTab })
+      );
+    } catch { /* ignore */ }
+  }, [activeTab, currentRole, activeTenant]);
+
   const handleNavigate = (tab: string) => {
     setActiveTab(tab);
     setSidebarOpen(false);
@@ -137,7 +162,20 @@ export function App() {
           const tData = await tenantsRes.json();
           if (tData.data?.length) {
             setTenants(tData.data);
-            setActiveTenant(tData.data[0]);
+            // Restore the previous session (role + active tenant + active tab) so a
+            // refresh keeps the user on the exact page they were viewing. Falls back
+            // to the first tenant if no saved session exists.
+            let restoredTenant = tData.data[0];
+            try {
+              const saved = JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null');
+              if (saved?.tenantId) {
+                const match = tData.data.find((t: any) => t.id === saved.tenantId);
+                if (match) restoredTenant = match;
+              }
+              if (saved?.role) setCurrentRole(saved.role);
+              if (saved?.tab) setActiveTab(saved.tab);
+            } catch { /* ignore */ }
+            setActiveTenant(restoredTenant);
           }
         }
         if (custRes.ok) {
