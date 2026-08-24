@@ -40,6 +40,20 @@ export const AuthSignInView: React.FC<AuthSignInViewProps> = ({
   const [errorMessage, setErrorMessage] = useState('');
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [rememberMe, setRememberMe] = useState(true);
+  const REMEMBER_KEY = 'billah_remember';
+
+  // On mount, prefill from a previously remembered credential (if any).
+  React.useEffect(() => {
+    try {
+      const raw = localStorage.getItem(REMEMBER_KEY);
+      if (raw) {
+        const saved = JSON.parse(raw);
+        if (saved?.username) setUsername(saved.username);
+        if (saved?.password) setPassword(saved.password);
+        if (saved?.mode) setAuthMode(saved.mode);
+      }
+    } catch { /* ignore corrupt storage */ }
+  }, []);
 
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -47,7 +61,19 @@ export const AuthSignInView: React.FC<AuthSignInViewProps> = ({
     setIsSigningIn(true);
     const result = await onLogin(username.trim(), password, authMode);
     setIsSigningIn(false);
-    if (!result.ok) {
+    if (result.ok) {
+      // Persist credentials only when "Remember me" is checked (user opt-in).
+      // NOTE: this stores the password in the browser's localStorage in plaintext.
+      // That is a deliberate convenience tradeoff requested by the user; it is not
+      // sent anywhere and is cleared if the box is unchecked on next login.
+      try {
+        if (rememberMe) {
+          localStorage.setItem(REMEMBER_KEY, JSON.stringify({ username: username.trim(), password, mode: authMode }));
+        } else {
+          localStorage.removeItem(REMEMBER_KEY);
+        }
+      } catch { /* storage may be unavailable */ }
+    } else {
       setErrorMessage(result.error || 'Invalid credentials.');
     }
   };

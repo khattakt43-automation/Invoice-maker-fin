@@ -408,12 +408,20 @@ export const InvoiceBuilderView: React.FC<InvoiceBuilderViewProps> = ({
       const h = document.getElementById('print-host');
       if (h) h.remove();
       document.removeEventListener('afterprint', cleanup);
+      window.removeEventListener('focus', cleanup);
+      document.removeEventListener('visibilitychange', onVisibility);
       clearTimeout(fallback);
     };
-    // Fallback: if afterprint doesn't fire, still remove the host so it can't
+    const onVisibility = () => { if (!document.hidden) cleanup(); };
+    // Fallback: if afterprint never fires, still remove the host so it can't
     // block the app or stack up on the next print.
     const fallback = setTimeout(cleanup, 60000);
     document.addEventListener('afterprint', cleanup);
+    // When the print dialog is closed (printed OR cancelled) the window regains
+    // focus / becomes visible again — clear the overlay immediately so the user
+    // returns to the Create Invoice screen instead of a frozen print page.
+    window.addEventListener('focus', cleanup);
+    document.addEventListener('visibilitychange', onVisibility);
     setTimeout(() => { window.print(); }, 60);
   };
 
