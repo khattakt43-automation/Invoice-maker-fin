@@ -258,21 +258,10 @@ function persistToDb(s: StoreShape) {
     );
     for (const p of s.products) upsertProd.run({ id: p.id, tid: p.tenantId || "", data: j(p) });
 
-    // CRITICAL: remove DB rows that no longer exist in memory. Without this a
-    // deleted invoice/customer/tenant/ product stays in the SQLite table and
-    // reappears after a refresh. (Bug #3: deleted data not persisting.)
-    const syncTable = (table: string, rows: { id: string }[]) => {
-      const liveIds = rows.map((r) => r.id);
-      const all = db.prepare(`SELECT id FROM ${table}`).all() as { id: string }[];
-      const stale = all.map((r) => r.id).filter((id) => !liveIds.includes(id));
-      const del = db.prepare(`DELETE FROM ${table} WHERE id = ?`);
-      for (const id of stale) del.run(id);
-    };
-    syncTable("invoices", s.invoices);
-    syncTable("customers", s.customers);
-    syncTable("tenants", s.tenants);
-    syncTable("products", s.products);
-
+    // NOTE: persistToDb() is intentionally UPSERT-ONLY. It does NOT delete rows
+    // that are absent from the in-memory array. Deletions are handled explicitly
+    // via deleteInvoice/deleteCustomer/deleteTenant/deleteProduct so a stale
+    // in-memory snapshot can never wipe live database rows.
     const metaKeys = [
       "platformKPIs",
       "retainerPlans",
@@ -293,6 +282,54 @@ function persistToDb(s: StoreShape) {
     for (const key of metaKeys) upsertMeta.run({ key, data: j((s as any)[key]) });
   });
   tx();
+}
+
+// ---------------------------------------------------------------------------
+// Explicit, row-level deletes. These remove a record from BOTH the in-memory
+// store AND the SQLite table.
+//
+// IMPORTANT (durability fix): persistToDb() is now UPSERT-ONLY. It must never
+// bulk-delete rows based on the in-memory array. A stale in-memory store (e.g.
+// after a restart/partial load) calling save() previously wiped live rows that
+// simply weren't loaded yet — that is what made created invoices "disappear"
+// and then fail to download ("invoice not found"). Deletions are explicit only,
+// so the database is always the source of truth.
+// ---------------------------------------------------------------------------
+function deleteRelRow(table: string, id: string) {
+  // `table` is a hard-coded constant from this module, never user input.
+  getDb().prepare(`DELETE FROM ${table} WHERE id = ?`).run(id);
+}
+
+export function deleteInvoice(id: string) {
+  ensureStore();
+  if (!store) return;
+  const i = store.invoices.findIndex((x) => x.id === id);
+  if (i >= 0) store.invoices.splice(i, 1);
+  deleteRelRow("invoices", id);
+}
+
+export function deleteCustomer(id: string) {
+  ensureStore();
+  if (!store) return;
+  const i = store.customers.findIndex((x) => x.id === id);
+  if (i >= 0) store.customers.splice(i, 1);
+  deleteRelRow("customers", id);
+}
+
+export function deleteTenant(id: string) {
+  ensureStore();
+  if (!store) return;
+  const i = store.tenants.findIndex((x) => x.id === id);
+  if (i >= 0) store.tenants.splice(i, 1);
+  deleteRelRow("tenants", id);
+}
+
+export function deleteProduct(id: string) {
+  ensureStore();
+  if (!store) return;
+  const i = store.products.findIndex((x) => x.id === id);
+  if (i >= 0) store.products.splice(i, 1);
+  deleteRelRow("products", id);
 }
 
 function ensureStore(): StoreShape {

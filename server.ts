@@ -11,7 +11,7 @@ import {
   initialRetainerPlans
 } from "./src/data/mockData";
 import { Tenant, Customer, Invoice, Product } from "./src/types";
-import { db, save } from "./src/server/db";
+import { db, save, deleteInvoice, deleteCustomer } from "./src/server/db";
 import bcrypt from "bcryptjs";
 import {
   attachSession,
@@ -276,8 +276,7 @@ async function startServer() {
       auditLog({ action: "authz.cross_tenant_block", tenantId: req.session!.tenantId, ip: getClientIp(req), success: false, detail: `customer ${req.params.id}` });
       return res.status(403).json({ error: "Forbidden: not your resource." });
     }
-    customers.splice(index, 1);
-    save();
+    deleteCustomer(req.params.id);
     res.json({ data: { id: req.params.id }, message: "Customer deleted successfully" });
   });
 
@@ -438,7 +437,8 @@ async function startServer() {
     const [removed] = invoices.splice(index, 1);
     const cust = customers.find((c) => c.id === removed.customerId || c.name === removed.customerName);
     if (cust && removed.status === "Paid") { cust.outstandingBalance = Math.max(0, cust.outstandingBalance + removed.totalAmount); }
-    save();
+    // Explicit DB delete (never bulk-wiped by save()). DB is the source of truth.
+    deleteInvoice(req.params.id);
     res.json({ data: { id: removed.id }, message: "Invoice deleted successfully" });
   });
 
