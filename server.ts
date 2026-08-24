@@ -1,5 +1,6 @@
 import express from "express";
 import path from "path";
+import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import {
   initialTenants,
@@ -11,6 +12,9 @@ import {
 } from "./src/data/mockData";
 import { Tenant, Customer, Invoice, Product } from "./src/types";
 import { db, save } from "./src/server/db";
+import { InvoiceDocument } from "./src/components/InvoiceDocument";
+import { renderToStaticMarkup } from "react-dom/server";
+import React from "react";
 
 // Seed WhatsApp entitlement defaults (kept for type references in this file).
 import { emptyUsage } from "./src/services/whatsappEntitlement";
@@ -443,129 +447,43 @@ async function startServer() {
   });
 
   // --- PUBLIC INVOICE VIEW (uses the system's own #printable-invoice layout + data) ---
-  const PAPER = {
-    "A4 (Standard)": { w: "210mm", h: "297mm", page: "A4" },
-    "A5": { w: "148mm", h: "210mm", page: "A5" },
-    "Letter": { w: "8.5in", h: "11in", page: "Letter" },
-    "Legal": { w: "8.5in", h: "14in", page: "Legal" },
-  };
-  // Shared invoice HTML renderer — single source of truth for the invoice design
-  // used by both the public view (/i/:number) and the example/sample view.
-  const renderInvoiceHtml = (inv: any, tenant: any, cust: any | undefined, opts?: { sample?: boolean }) => {
-    const fmt = (n: number) => (n ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2 });
-    const GREEN = "#006a46";
-    const DARK = "#0b1c30";
-    const MUTE = "#545f73";
-    const paper = PAPER[inv.paperSize as keyof typeof PAPER] || PAPER["A4 (Standard)"];
-    const initials = tenant.initials || tenant.name.slice(0, 2).toUpperCase();
-    const rows = inv.items.map((it: any) => {
-      const amt = (it.amount != null && it.amount !== 0) ? it.amount : (Number(it.quantity || 1) * Number(it.unitPrice || 0));
-      return `
-      <tr class="item">
-        <td>${it.description}</td>
-        <td class="ctr">${it.quantity} ${it.sizeUnit || ""}</td>
-        <td class="rgt mono">${fmt(it.unitPrice)}</td>
-        <td class="ctr mono">${it.taxRate > 0 ? (it.taxRate * 100).toFixed(0) + "%" : "0%"}</td>
-        <td class="rgt mono">${fmt(amt)}</td>
-      </tr>`;
-    }).join("");
-    const billLines = [inv.customerAddress, inv.customerPhone && `Tel/WhatsApp: ${inv.customerPhone}`, inv.customerEmail && `Email: ${inv.customerEmail}`, inv.customerTin && `TIN: ${inv.customerTin}`].filter(Boolean).join("<br>");
-    const sampleBanner = opts?.sample
-      ? `<div style="background:#fff7ed;color:#9a3412;border:1px solid #fdba74;border-radius:10px;padding:10px 14px;margin-bottom:18px;font-size:12px;font-weight:600;text-align:center">SAMPLE / DEMO INVOICE — not a real transaction. For demonstration only.</div>`
-      : "";
-    const html = `<!doctype html><html><head><meta charset="utf-8"><title>${inv.invoiceNumber} - ${tenant.name}</title>
+  // ---------------------------------------------------------------------------
+  // INVOICE PUBLIC VIEW (single source of truth = src/components/InvoiceDocument)
+  // The SAME component renders the live builder preview, so the downloaded PDF
+  // is pixel-identical to what the user sees on screen.
+  // ---------------------------------------------------------------------------
+  // Read the built Tailwind CSS once at startup so the SSR invoice is styled.
+  let invoiceCss = '';
+  try {
+    const cssDir = path.join(process.cwd(), 'dist', 'assets');
+    const cssFile = fs.readdirSync(cssDir).find((f) => f.endsWith('.css'));
+    if (cssFile) invoiceCss = fs.readFileSync(path.join(cssDir, cssFile), 'utf8');
+  } catch { /* dev mode: no built css yet */ }
+
+  const renderInvoicePage = (inv: any, tenant: any, cust: any, opts?: { sample?: boolean }) => {
+    const body = renderToStaticMarkup(
+      React.createElement(InvoiceDocument, { tenant, invoice: inv, customer: cust, sample: opts?.sample })
+    );
+    return `<!doctype html><html><head><meta charset="utf-8"><title>${inv.invoiceNumber} - ${tenant?.name}</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
-  @page{size:${paper.page};margin:0}
-  body{font-family:Inter,system-ui,sans-serif;color:${DARK};background:#f0f2f5;padding:24px}
-  .sheet{background:#fff;width:${paper.w};min-height:${paper.h};max-width:${paper.w};margin:0 auto;padding:24mm 18mm;border:1px solid #bdcac0;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.08);position:relative;overflow:hidden}
-  .wm{position:absolute;right:40px;top:90px;font-size:64px;font-weight:900;transform:rotate(12deg);border:6px solid currentColor;padding:8px 16px;border-radius:16px;opacity:.08;color:${GREEN};pointer-events:none}
-  .head{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1px solid rgba(11,28,48,.15);padding-bottom:28px;gap:16px}
-  .brand{display:flex;align-items:center;gap:12px}
-  .logo{width:32px;height:32px;border-radius:8px;background:${GREEN};color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px}
-  h1{font-size:20px;font-weight:800}
-  .addr{font-size:12px;color:${MUTE};line-height:1.5;max-width:300px;white-space:pre-line;margin-top:6px}
-  .meta{font-size:12px;color:${MUTE};font-family:monospace;line-height:1.6;margin-top:6px}
-  .title{font-size:30px;font-weight:900;letter-spacing:1px;color:${GREEN};text-transform:uppercase;text-align:right}
-  .invno{font-size:13px;font-weight:700;font-family:monospace;text-align:right;margin-top:4px}
-  .dates{font-size:12px;color:${MUTE};text-align:right;margin-top:8px;line-height:1.6}
-  .billed{border-bottom:1px solid rgba(11,28,48,.1);padding:22px 0;display:flex;justify-content:space-between;gap:16px}
-  .lbl{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:${MUTE};display:block;margin-bottom:4px}
-  .cust{font-weight:700;font-size:14px}
-  .custlines{font-size:12px;color:${MUTE};line-height:1.6;margin-top:4px}
-  .pill{display:inline-block;padding:4px 12px;border-radius:999px;font-size:11px;font-weight:700;text-transform:uppercase;background:#fef3c7;color:#92400e}
-  table{width:100%;border-collapse:collapse;margin-top:20px}
-  thead th{font-size:11px;text-transform:uppercase;letter-spacing:1px;border-bottom:2px solid ${DARK};text-align:left;padding:10px 6px;color:${DARK}}
-  thead th.ctr{text-align:center}thead th.rgt{text-align:right}
-  tbody td{padding:12px 6px;border-bottom:1px solid rgba(189,202,192,.4);font-size:12px}
-  tbody td.ctr{text-align:center;font-family:monospace;color:${MUTE}}tbody td.rgt{text-align:right;font-family:monospace;font-weight:700}
-  .sum{display:flex;justify-content:space-between;gap:40px;margin-top:24px;border-top:2px solid ${DARK};padding-top:16px}
-  .remit{font-size:12px;line-height:1.7}
-  .totals{width:260px;font-size:12px}
-  .totals .row{display:flex;justify-content:space-between;color:${MUTE};margin-bottom:8px}
-  .totaldue{display:flex;justify-content:space-between;align-items:baseline;border-top:2px solid ${GREEN};padding-top:8px;color:${GREEN}}
-  .totaldue .big{font-size:22px;font-weight:900;font-family:monospace}
-  .foot{margin-top:48px;border-top:1px solid rgba(189,202,192,.4);text-align:center;font-size:10px;color:${MUTE};font-family:monospace;padding-top:16px}
-  .toolbar{position:fixed;top:10px;right:10px;z-index:50}
-  .btn{background:${GREEN};color:#fff;border:none;padding:10px 18px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer}
-  @media print{.toolbar{display:none!important}html,body{margin:0!important;padding:0!important;background:#fff!important;width:100%!important}.sheet{position:static!important;width:100%!important;max-width:100%!important;min-height:0!important;height:auto!important;margin:0!important;padding:14mm 12mm!important;border:none!important;box-shadow:none!important;border-radius:0!important;page-break-after:avoid;page-break-inside:avoid}}
+  @page{size:A4;margin:0}
+  body{background:#f0f2f5;padding:24px;font-family:Inter,system-ui,sans-serif}
+  .inv-wrap{display:flex;justify-content:center}
+  ${invoiceCss}
+  @media print{html,body{margin:0!important;padding:0!important;background:#fff!important}#print-host{position:static!important}#printable-invoice{margin:0 auto!important;box-shadow:none!important;border-radius:0!important}}
 </style></head>
 <body>
-  <div class="sheet">
-    ${sampleBanner}
-    <div class="wm">${inv.status}</div>
-    <div class="head">
-      <div>
-        <div class="brand"><div class="logo">${initials}</div><h1>${tenant.name}</h1></div>
-        <div class="addr">${tenant.address || ""}</div>
-        <div class="meta"><strong>SST ID:</strong> ${tenant.sstId || "—"}<br><strong>TIN:</strong> ${tenant.tin || "—"}</div>
-      </div>
-      <div>
-        <div class="title">${tenant.invoiceTitle || "TAX INVOICE"}</div>
-        <div class="invno">${inv.invoiceNumber}</div>
-        <div class="dates"><strong>Date:</strong> ${inv.date}<br><strong>Due Date:</strong> ${inv.dueDate || "Due Upon Receipt"}</div>
-      </div>
-    </div>
-    <div class="billed">
-      <div>
-        <span class="lbl">Billed To</span>
-        <div class="cust">${inv.customerName || (cust && cust.name) || "—"}</div>
-        <div class="custlines">${billLines}</div>
-      </div>
-      <div style="text-align:right">
-        <span class="lbl">Payment Status</span>
-        <span class="pill">${inv.status}</span>
-      </div>
-    </div>
-    <table>
-      <thead><tr><th>Item Description</th><th class="ctr">Qty / Size</th><th class="rgt">Unit Price (${inv.currency})</th><th class="ctr">SST</th><th class="rgt">Total (${inv.currency})</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-    <div class="sum">
-      <div class="remit">
-        <span class="lbl">Remittance Instructions</span>
-        <div class="mono"><strong>Bank:</strong> ${tenant.bankName}</div>
-        <div class="mono"><strong>Account Name:</strong> ${tenant.bankTitle || tenant.name}</div>
-        <div class="mono"><strong>Account No:</strong> ${tenant.bankAccount}</div>
-        ${inv.notes ? `<div style="font-size:11px;color:${MUTE};font-style:italic;margin-top:6px">${inv.notes}</div>` : ""}
-      </div>
-      <div class="totals">
-        <div class="row"><span>Subtotal:</span><span class="mono">${inv.currency} ${fmt(inv.subtotal)}</span></div>
-        <div class="row"><span>SST (${((inv.taxRate || 0) * 100).toFixed(0)}%):</span><span class="mono">${inv.currency} ${fmt(inv.taxAmount)}</span></div>
-        <div class="totaldue"><span class="lbl" style="color:${GREEN}">Total Due:</span><span class="big">${inv.currency} ${fmt(inv.totalAmount)}</span></div>
-      </div>
-    </div>
-    <div class="foot">This is a computer-generated tax invoice issued via BillLah! Cloud Invoicing. No physical signature required.</div>
-  </div>
-  <div class="toolbar"><button class="btn" onclick="window.print()">Print / Save as PDF</button></div>
+  <div class="inv-wrap"><div id="print-host">${body}</div></div>
+  <div style="position:fixed;top:10px;right:10px;z-index:50"><button onclick="window.print()" style="background:#006a46;color:#fff;border:none;padding:10px 18px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer">Print / Save as PDF</button></div>
+  <script>window.onload=function(){setTimeout(function(){window.print();},250);}</script>
 </body></html>`;
-    return html;
   };
 
   app.get("/i/example", (req, res) => {
     // Clearly-labeled sample/demo invoice rendered with the SAME design as real
     // invoices (spec point 6). It is never mixed with real customer invoices.
-    const tenant = tenants[0];
+    const tenant = store.tenants[0];
     const sampleInv = {
       invoiceNumber: "INV-SAMPLE-0001",
       customerName: "Sample Customer Sdn Bhd",
@@ -575,6 +493,7 @@ async function startServer() {
       customerTin: "C1234567890",
       date: new Date().toISOString().split("T")[0],
       dueDate: new Date(Date.now() + 30 * 86400000).toISOString().split("T")[0],
+      hasDueDate: true,
       status: "Unpaid",
       currency: "RM",
       paperSize: "A4 (Standard)",
@@ -588,25 +507,26 @@ async function startServer() {
       taxAmount: 86.4,
       totalAmount: 1166.4,
       notes: "Thank you for your business. Payment due within 30 days.",
+      showDocTitle: true,
+      docTitle: "TAX INVOICE",
+      docTitleSize: 30,
     };
-    const html = renderInvoiceHtml(sampleInv, tenant, undefined, { sample: true });
     res.setHeader("Content-Type", "text/html");
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
     res.setHeader("Pragma", "no-cache");
-    res.send(html);
+    res.send(renderInvoicePage(sampleInv, tenant, undefined, { sample: true }));
   });
 
   app.get("/i/:number", (req, res) => {
     const num = String(req.params.number).toLowerCase().replace(/[^a-z0-9]/g, "");
-    const inv = invoices.find((i) => i.invoiceNumber.toLowerCase().replace(/[^a-z0-9]/g, "") === num);
+    const inv = store.invoices.find((i) => i.invoiceNumber.toLowerCase().replace(/[^a-z0-9]/g, "") === num);
     if (!inv) return res.status(404).send("<h1>Invoice not found</h1>");
-    const tenant = tenants.find((t) => t.id === inv.tenantId) || initialTenants[0];
-    const cust = customers.find((c) => c.id === inv.customerId);
-    const html = renderInvoiceHtml(inv, tenant, cust);
+    const tenant = store.tenants.find((t) => t.id === inv.tenantId) || initialTenants[0];
+    const cust = store.customers.find((c) => c.id === inv.customerId);
     res.setHeader("Content-Type", "text/html");
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
     res.setHeader("Pragma", "no-cache");
-    res.send(html);
+    res.send(renderInvoicePage({ ...inv, hasDueDate: Boolean(inv.dueDate && inv.dueDate.trim().length > 0) }, tenant, cust));
   });
 
   // ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { Customer, Invoice, InvoiceItem, Product, Tenant } from '../types';
 import { SendInvoiceModal } from './SendInvoiceModal';
+import { InvoiceDocument } from './InvoiceDocument';
 import { generateUniqueInvoiceNumber } from '../utils/invoiceUtils';
 
 interface InvoiceBuilderViewProps {
@@ -74,7 +75,7 @@ export const InvoiceBuilderView: React.FC<InvoiceBuilderViewProps> = ({
     Boolean(initialInvoice ? initialInvoice.dueDate && initialInvoice.dueDate.trim().length > 0 : true)
   );
   const [currency, setCurrency] = useState<'MYR' | 'USD' | 'SGD'>(
-    initialInvoice?.currency || 'MYR'
+    (initialInvoice?.currency || tenant.currency || 'RM') as any
   );
   const [paperSize, setPaperSize] = useState<'A4 (Standard)' | 'A5' | 'Letter' | 'Legal'>(
     initialInvoice?.paperSize || 'A4 (Standard)'
@@ -109,16 +110,13 @@ export const InvoiceBuilderView: React.FC<InvoiceBuilderViewProps> = ({
     initialInvoice?.qrAlign || 'right'
   );
 
-  // Paper size dimensions (CSS px @96dpi) + currency formatter (Points 1 & 3)
+  // Paper size dimensions (CSS px @96dpi)
   const PAPER: Record<string, { w: number; h: number; label: string }> = {
     'A4 (Standard)': { w: 794, h: 1123, label: '210mm × 297mm Standard' },
     'A5': { w: 559, h: 794, label: '148mm × 210mm' },
     'Letter': { w: 816, h: 1056, label: '8.5in × 11in' },
     'Legal': { w: 816, h: 1344, label: '8.5in × 14in' },
   };
-  const CURRENCY_SYMBOL: Record<string, string> = { MYR: 'RM', USD: '$', SGD: 'S$', EUR: '€' };
-  const fmt = (n: number) =>
-    `${CURRENCY_SYMBOL[currency] || ''} ${Number(n || 0).toLocaleString('en-MY', { minimumFractionDigits: 2 })}`;
 
   // Line items
   const [items, setItems] = useState<InvoiceItem[]>(
@@ -1012,221 +1010,38 @@ export const InvoiceBuilderView: React.FC<InvoiceBuilderViewProps> = ({
             </span>
           </div>
 
-          {/* THE PRINTABLE SHEET */}
-          <div
-            id="printable-invoice"
-            className="bg-white rounded-xl border border-[#bdcac0] shadow-2xl p-8 sm:p-12 text-[#0b1c30] font-sans relative overflow-hidden transition-all"
-            style={{
-              width: PAPER[paperSize]?.w ? `${PAPER[paperSize].w}px` : '794px',
-              minHeight: PAPER[paperSize]?.h ? `${PAPER[paperSize].h}px` : '842px',
-              maxWidth: '100%',
+          {/* THE PRINTABLE SHEET — single source of truth (shared with server /i/:number) */}
+          <InvoiceDocument
+            tenant={tenant}
+            customer={selectedCustomerId ? customers.find((c) => c.id === selectedCustomerId) : undefined}
+            invoice={{
+              invoiceNumber,
+              date,
+              dueDate,
+              hasDueDate,
+              customerName,
+              customerAddress,
+              customerPhone,
+              customerEmail,
+              customerTin,
+              status,
+              currency,
+              items,
+              subtotal,
+              taxAmount,
+              totalAmount,
+              taxRate: 0.08,
+              notes,
+              notesAlign,
+              paperSize,
+              qrData,
+              qrAlign,
+              qrSize,
+              showDocTitle,
+              docTitle,
+              docTitleSize,
             }}
-          >
-            {/* Status watermark */}
-            <div className="absolute right-12 top-24 pointer-events-none select-none opacity-10 font-mono text-7xl font-black uppercase transform rotate-12 border-8 border-current px-6 py-2 rounded-2xl text-[#006a46]">
-              {status}
-            </div>
-
-            {/* Header: Tenant Details */}
-            <div className="flex flex-col sm:flex-row justify-between items-start border-b border-[#0b1c30]/15 pb-8 gap-4">
-              <div>
-                <div className="flex items-center gap-3 mb-2">
-                  {tenant.logoUrl || tenant.customerLogoUrl ? (
-                    <div
-                      className="p-1 bg-white rounded-lg border border-[#bdcac0]/50 shadow-2xs flex items-center justify-center overflow-hidden"
-                      style={{
-                        height: `${tenant.logoHeight || 48}px`,
-                        maxWidth: `${(tenant.logoHeight || 48) * 3.5}px`,
-                      }}
-                    >
-                      <img
-                        src={tenant.logoUrl || tenant.customerLogoUrl}
-                        alt={tenant.name}
-                        className="max-h-full max-w-full object-contain"
-                        referrerPolicy="no-referrer"
-                      />
-                    </div>
-                  ) : (
-                    <div className="w-8 h-8 rounded-lg bg-[#00855a] text-white flex items-center justify-center font-bold text-sm">
-                      {tenant.initials}
-                    </div>
-                  )}
-                  <h1 className="text-xl font-extrabold tracking-tight text-[#0b1c30]">
-                    {tenant.name}
-                  </h1>
-                </div>
-                <p className="text-xs text-[#545f73] leading-relaxed max-w-sm whitespace-pre-line">
-                  {tenant.address}
-                </p>
-                <div className="mt-2 text-xs font-mono text-[#3e4942] space-y-0.5">
-                  <p><strong>SST ID:</strong> {tenant.sstId}</p>
-                  <p><strong>TIN:</strong> {tenant.tin}</p>
-                </div>
-              </div>
-
-              <div className="text-left sm:text-right">
-                {showDocTitle && (
-                  <span
-                    className="font-black tracking-wider text-[#006a46] uppercase block"
-                    style={{ fontSize: `${docTitleSize}px`, lineHeight: 1.1 }}
-                  >
-                    {docTitle || tenant.invoiceTitle || 'TAX INVOICE'}
-                  </span>
-                )}
-                <p className="text-sm font-mono font-bold text-[#0b1c30] mt-1">{invoiceNumber}</p>
-                <div className="text-xs text-[#545f73] mt-2 space-y-0.5">
-                  <p><strong>Date:</strong> {date}</p>
-                  {hasDueDate && dueDate ? (
-                    <p><strong>Due Date:</strong> {dueDate}</p>
-                  ) : (
-                    <p className="text-[#545f73]"><strong>Due Date:</strong> Due Upon Receipt</p>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {/* Billed To Section */}
-            <div className="py-6 border-b border-[#0b1c30]/10 grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <span className="text-[11px] font-bold uppercase tracking-wider text-[#545f73] block mb-1">
-                  BILLED TO
-                </span>
-                <p className="font-bold text-sm text-[#0b1c30]">{customerName}</p>
-                <p className="text-xs text-[#545f73] whitespace-pre-line mt-1 leading-relaxed">
-                  {customerAddress}
-                </p>
-                <div className="text-xs font-mono text-[#3e4942] mt-1 space-y-0.5">
-                  {customerPhone && <p><strong>Tel/WhatsApp:</strong> {customerPhone}</p>}
-                  {customerEmail && <p><strong>Email:</strong> {customerEmail}</p>}
-                  {customerTin && <p><strong>TIN:</strong> {customerTin}</p>}
-                </div>
-              </div>
-
-              <div className="sm:text-right flex flex-col justify-end">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-[#545f73] block mb-1">
-                  PAYMENT STATUS
-                </span>
-                <div>
-                  <span
-                    className={`inline-block px-3 py-1 rounded-full text-xs font-bold font-mono uppercase tracking-wider ${
-                      status === 'Paid'
-                        ? 'bg-[#00855a]/15 text-[#006a46]'
-                        : status === 'Unpaid'
-                        ? 'bg-amber-100 text-amber-900'
-                        : status === 'Overdue'
-                        ? 'bg-red-100 text-red-900'
-                        : 'bg-gray-100 text-gray-800'
-                    }`}
-                  >
-                    {status}
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            {/* Items Table */}
-            <div className="py-6 overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="border-b-2 border-[#0b1c30] text-[11px] font-bold tracking-wider text-[#0b1c30] uppercase">
-                    <th className="py-2.5 px-2">Item Description</th>
-                    <th className="py-2.5 px-2 text-center">Qty / Size</th>
-                    <th className="py-2.5 px-2 text-right">Unit Price ({currency})</th>
-                    <th className="py-2.5 px-2 text-center">SST</th>
-                    <th className="py-2.5 px-2 text-right">Total ({currency})</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#bdcac0]/40 text-xs">
-                  {items.map((it) => (
-                    <tr key={it.id}>
-                      <td className="py-3 px-2 font-medium text-[#0b1c30]">{it.description}</td>
-                      <td className="py-3 px-2 text-center font-mono text-[#545f73]">
-                        {it.quantity} {it.sizeUnit || ''}
-                      </td>
-                      <td className="py-3 px-2 text-right font-mono text-[#0b1c30]">
-                        {fmt(it.unitPrice)}
-                      </td>
-                      <td className="py-3 px-2 text-center font-mono text-[#545f73]">
-                        {it.taxRate > 0 ? `${(it.taxRate * 100).toFixed(0)}%` : '0%'}
-                      </td>
-                      <td className="py-3 px-2 text-right font-mono font-bold text-[#0b1c30]">
-                        {fmt(it.amount)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            {/* Calculations & Total Summary */}
-            <div className="border-t-2 border-[#0b1c30]/20 pt-4 flex flex-col sm:flex-row justify-between items-start gap-6">
-              {/* Bank & Remittance instructions */}
-              <div className="sm:max-w-xs text-xs space-y-1.5">
-                <span className="font-bold text-[11px] uppercase tracking-wider text-[#545f73] block">
-                  Remittance Instructions
-                </span>
-                <p className="font-mono text-xs text-[#0b1c30]">
-                  <strong>Bank:</strong> {tenant.bankName}
-                </p>
-                <p className="font-mono text-xs text-[#0b1c30]">
-                  <strong>Account Name:</strong> {tenant.bankTitle || tenant.name}
-                </p>
-                <p className="font-mono text-xs text-[#0b1c30]">
-                  <strong>Account No:</strong> {tenant.bankAccount}
-                </p>
-                <p className="text-[11px] text-[#545f73] italic pt-1 leading-relaxed" style={{ textAlign: notesAlign }}>
-                  {notes}
-                </p>
-              </div>
-
-              {/* Total calculations block */}
-              <div className="w-full sm:w-64 space-y-2 text-xs">
-                <div className="flex justify-between text-[#545f73]">
-                  <span>Subtotal:</span>
-                  <span className="font-mono text-[#0b1c30]">
-                    {fmt(subtotal)}
-                  </span>
-                </div>
-                <div className="flex justify-between text-[#545f73]">
-                  <span>SST ({taxAmount > 0 ? 8 : 0}%):</span>
-                  <span className="font-mono text-[#0b1c30]">
-                    {fmt(taxAmount)}
-                  </span>
-                </div>
-                <div className="flex justify-between items-baseline pt-2 border-t-2 border-[#006a46] text-[#006a46]">
-                  <span className="text-sm font-bold uppercase tracking-wider">Total Due:</span>
-                  <span className="font-mono text-xl font-black">
-                    {fmt(totalAmount)}
-                  </span>
-                </div>
-              </div>
-
-            </div>
-
-              {/* QR Code block (full sheet width so alignment reaches true edges) */}
-              {qrData && (
-                <div
-                  className="mt-4 w-full"
-                  style={{
-                    display: 'flex',
-                    justifyContent:
-                      qrAlign === 'left' ? 'flex-start' : qrAlign === 'center' ? 'center' : 'flex-end',
-                  }}
-                >
-                  <img
-                    src={`https://api.qrserver.com/v1/create-qr-code/?size=${qrSize}x${qrSize}&data=${encodeURIComponent(qrData)}`}
-                    alt="QR Code"
-                    style={{ width: qrSize, height: qrSize }}
-                    className="border border-[#bdcac0] rounded"
-                  />
-                </div>
-              )}
-
-            {/* Footer Signoff */}
-            <div className="mt-12 pt-6 border-t border-[#bdcac0]/40 text-center text-[10px] text-[#545f73] font-mono">
-              This is a computer-generated tax invoice issued via BillLah! Cloud Invoicing. No physical signature required.
-            </div>
-          </div>
+          />
         </div>
       </div>
 
