@@ -528,6 +528,14 @@ async function startServer() {
     const sampleBanner = opts?.sample
       ? `<div style="background:#fff7ed;color:#9a3412;border:1px solid #fdba74;border-radius:10px;padding:10px 14px;margin-bottom:18px;font-size:12px;font-weight:600;text-align:center">SAMPLE / DEMO INVOICE — not a real transaction. For demonstration only.</div>`
       : "";
+    const logoHtml = tenant.logoUrl || tenant.customerLogoUrl
+      ? `<img class="logo-img" src="${tenant.logoUrl || tenant.customerLogoUrl}" alt="${tenant.name} logo">`
+      : `<div class="logo">${initials}</div>`;
+    // Respect the per-invoice document title (e.g. "Cash Sale") if set; fall back
+    // to the tenant's default invoice title, then to "TAX INVOICE".
+    const docTitle = inv.showDocTitle === false
+      ? ""
+      : (inv.docTitle || tenant.invoiceTitle || "TAX INVOICE");
     const html = `<!doctype html><html><head><meta charset="utf-8"><title>${inv.invoiceNumber} - ${tenant.name}</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
@@ -538,6 +546,7 @@ async function startServer() {
   .head{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1px solid rgba(11,28,48,.15);padding-bottom:28px;gap:16px}
   .brand{display:flex;align-items:center;gap:12px}
   .logo{width:32px;height:32px;border-radius:8px;background:${GREEN};color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px}
+  .logo-img{height:40px;max-width:150px;object-fit:contain;border-radius:6px;display:block}
   h1{font-size:20px;font-weight:800}
   .addr{font-size:12px;color:${MUTE};line-height:1.5;max-width:300px;white-space:pre-line;margin-top:6px}
   .meta{font-size:12px;color:${MUTE};font-family:monospace;line-height:1.6;margin-top:6px}
@@ -571,12 +580,12 @@ async function startServer() {
     <div class="wm">${inv.status}</div>
     <div class="head">
       <div>
-        <div class="brand"><div class="logo">${initials}</div><h1>${tenant.name}</h1></div>
+        <div class="brand">${logoHtml}<h1>${tenant.name}</h1></div>
         <div class="addr">${tenant.address || ""}</div>
         <div class="meta"><strong>SST ID:</strong> ${tenant.sstId || "—"}<br><strong>TIN:</strong> ${tenant.tin || "—"}</div>
       </div>
       <div>
-        <div class="title">${tenant.invoiceTitle || "TAX INVOICE"}</div>
+        <div class="title">${docTitle}</div>
         <div class="invno">${inv.invoiceNumber}</div>
         <div class="dates"><strong>Date:</strong> ${inv.date}<br><strong>Due Date:</strong> ${inv.dueDate || "Due Upon Receipt"}</div>
       </div>
