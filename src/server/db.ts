@@ -318,6 +318,8 @@ function ensureStore(): StoreShape {
       }
     }
     store = legacy ?? seedStore();
+    // Hash any plaintext tenant passwords before first persist (so tenant login works).
+    hashPlaintextTenantPasswords(store);
     persistToDb(store);
     // Rename legacy file so we don't re-migrate on next start (keep as backup).
     if (fs.existsSync(LEGACY_STORE_FILE)) {
@@ -332,8 +334,15 @@ function ensureStore(): StoreShape {
   // Migrate any plaintext tenant passwords to bcrypt hashes (one-time, in place).
   // Detect plaintext by the absence of the bcrypt marker ($2). New accounts are
   // always stored hashed; this only fixes legacy/restored data.
+  hashPlaintextTenantPasswords(store);
+  return store;
+}
+
+// Hash any tenant password that is still stored in plaintext (missing the bcrypt
+// "$2" marker). Idempotent — already-hashed passwords are left untouched.
+function hashPlaintextTenantPasswords(s: StoreShape) {
   let pwdMigrated = false;
-  for (const t of store.tenants) {
+  for (const t of s.tenants) {
     if (t.password && !String(t.password).startsWith("$2")) {
       try {
         t.password = bcrypt.hashSync(t.password, 12);
@@ -341,8 +350,7 @@ function ensureStore(): StoreShape {
       } catch { /* ignore */ }
     }
   }
-  if (pwdMigrated) persistToDb(store);
-  return store;
+  if (pwdMigrated) persistToDb(s);
 }
 
 /** Reload from disk so a freshly-started process reflects the SQLite store. */

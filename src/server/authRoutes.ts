@@ -52,8 +52,7 @@ export const CSRF_COOKIE = "billah_csrf";
 function isHttps(req: Request): boolean {
   return (
     req.secure ||
-    req.headers["x-forwarded-proto"] === "https" ||
-    process.env.NODE_ENV === "production"
+    req.headers["x-forwarded-proto"] === "https"
   );
 }
 
@@ -68,8 +67,8 @@ function setSessionCookie(req: Request, res: Response, id: string) {
   });
 }
 
-function setCsrfCookie(res: Response, token: string) {
-  const secure = process.env.NODE_ENV === "production";
+function setCsrfCookie(req: Request, res: Response, token: string) {
+  const secure = isHttps(req);
   res.cookie(CSRF_COOKIE, token, {
     httpOnly: false, // readable by JS for double-submit
     secure,
@@ -163,7 +162,7 @@ authRouter.post("/api/auth/login", (req, res) => {
       clearLoginFailure(lockKey);
       const s = createSession({ tenantId: null, role: "super_admin", ip, userAgent: req.headers["user-agent"] || "" });
       setSessionCookie(req, res, s.id);
-      setCsrfCookie(res, s.csrf);
+      setCsrfCookie(req, res, s.csrf);
       auditLog({ action: "auth.login_success", role: "super_admin", ip, success: true });
       return res.json({ ok: true, role: "super_admin", csrf: s.csrf });
     }
@@ -183,7 +182,7 @@ authRouter.post("/api/auth/login", (req, res) => {
     clearLoginFailure(lockKey);
     const s = createSession({ tenantId: tenant.id, role: "tenant", ip, userAgent: req.headers["user-agent"] || "" });
     setSessionCookie(req, res, s.id);
-    setCsrfCookie(res, s.csrf);
+    setCsrfCookie(req, res, s.csrf);
     auditLog({ action: "auth.login_success", tenantId: tenant.id, role: "tenant", ip, success: true });
     // Return only safe, non-secret tenant fields.
     const safe = { ...tenant };
@@ -218,7 +217,7 @@ authRouter.post("/api/auth/impersonate", requireAdmin, (req, res) => {
   if (req.session) destroySession(req.session.id);
   const s = createSession({ tenantId: tenant.id, role: "tenant", ip: getClientIp(req), userAgent: req.headers["user-agent"] || "" });
   setSessionCookie(req, res, s.id);
-  setCsrfCookie(res, s.csrf);
+  setCsrfCookie(req, res, s.csrf);
   auditLog({ action: "admin.impersonate", tenantId: tenant.id, role: "super_admin", ip: getClientIp(req), success: true, detail: `admin->${tenant.username || tenant.id}` });
   res.json({ ok: true, role: "tenant", tenantId: tenant.id });
 });

@@ -232,16 +232,28 @@ export function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  // Switch Role between Business Portal and Super Admin
-  const handleSwitchRole = () => {
-    // Both directions require a password gate. Open the modal; the actual
-    // switch only happens after the password is validated in handleRoleGateSubmit.
-    setPendingRoleSwitch(currentRole === 'business_admin' ? 'super_admin' : 'business_admin');
+  // Switch Role between Business Portal and Super Admin.
+  const handleSwitchRole = async () => {
+    if (currentRole === 'super_admin') {
+      // Super admin -> business portal = IMPERSONATE the active tenant.
+      // No tenant password required (admin privilege, spec #4). Switch directly.
+      const { ok, data } = await apiPost('/api/auth/impersonate', { tenantId: activeTenant.id });
+      if (ok && data?.ok) {
+        tenantIdRef.current = activeTenant.id;
+        const safe = { ...activeTenant }; delete safe.password;
+        setActiveTenant(safe);
+        setCurrentRole('business_admin');
+        setActiveTab('dashboard');
+      }
+      return;
+    }
+    // business_admin -> super_admin requires the super-admin password gate.
+    setPendingRoleSwitch('super_admin');
     setIsRoleGateOpen(true);
   };
 
-  // Called by the gate modal with the entered password. Authentication is
-  // delegated to the server (no client-side password comparison — spec #2).
+  // Called by the gate modal with the entered password (only used when
+  // switching TO super_admin). Authentication is delegated to the server.
   const handleRoleGateSubmit = async (entered: string) => {
     const target = pendingRoleSwitch;
     if (!target) return;
@@ -249,7 +261,7 @@ export function App() {
     if (target === 'super_admin') {
       result = await handleSignIn('superadmin', entered, 'super_admin');
     } else {
-      // Switching back to a tenant: authenticate as that tenant using its username.
+      // Fallback: switching back to a tenant requires that tenant's password.
       const u = activeTenant?.username || activeTenant?.code;
       result = await handleSignIn(u, entered, 'tenant');
     }
