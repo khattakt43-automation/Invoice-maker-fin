@@ -223,30 +223,64 @@ async function startServer() {
   app.post("/api/invoices", (req, res) => {
     const invCount = invoices.length + 1;
     const invNumber = req.body.invoiceNumber || `INV-2023-${String(1040 + invCount)}`;
-    
-    const subtotal = (req.body.items || []).reduce(
+
+    // Honor EACH line item's own tax rate (0% / 8% / 6%) instead of one
+    // invoice-level rate applied to the whole subtotal. Fixes "no-tax invoice
+    // still charged 8% SST".
+    const items = (req.body.items || []).map((it: any) => ({
+      ...it,
+      taxRate: Number(it.taxRate) || 0,
+    }));
+    const subtotal = items.reduce(
       (acc: number, item: any) => acc + (Number(item.unitPrice) || 0) * (Number(item.quantity) || 1),
       0
     );
-    const taxRate = req.body.taxRate !== undefined ? Number(req.body.taxRate) : 0.0;
-    const taxAmount = subtotal * taxRate;
+    const taxAmount = items.reduce(
+      (acc: number, item: any) => acc + (Number(item.amount) || (Number(item.unitPrice) || 0) * (Number(item.quantity) || 1)) * (Number(item.taxRate) || 0),
+      0
+    );
     const totalAmount = subtotal + taxAmount;
+
+    // Auto-create a customer record when a brand-new (manual) customer is billed.
+    let customerId = req.body.customerId || "";
+    const customerName = req.body.customerName || "Customer Name";
+    if (!customerId && customerName && customerName !== "Customer Name") {
+      const existing = customers.find((c) => c.name.toLowerCase() === customerName.toLowerCase());
+      if (existing) {
+        customerId = existing.id;
+      } else {
+        customerId = `cust-${Date.now()}`;
+        customers.unshift({
+          id: customerId,
+          name: customerName,
+          email: req.body.customerEmail || "",
+          phone: req.body.customerPhone || "",
+          address: req.body.customerAddress || "",
+          tin: req.body.customerTin || "",
+          outstandingBalance: 0,
+          ltv: 0,
+          status: "CURRENT",
+          recentInvoices: [],
+          tenantId: req.body.tenantId || "tenant-tech-solutions",
+        });
+      }
+    }
 
     const newInvoice: Invoice = {
       id: `inv-${Date.now()}`,
       invoiceNumber: invNumber,
       tenantId: req.body.tenantId || "tenant-tech-solutions",
-      customerId: req.body.customerId || "cust-custom",
-      customerName: req.body.customerName || "Customer Name",
+      customerId: customerId || "cust-custom",
+      customerName,
       customerEmail: req.body.customerEmail || "",
       customerPhone: req.body.customerPhone || "",
       customerAddress: req.body.customerAddress || "",
-      customerTin: req.body.customerTin || "C1234567890",
+      customerTin: req.body.customerTin || "",
       date: req.body.date || new Date().toISOString().split("T")[0],
       dueDate: req.body.dueDate || new Date(Date.now() + 30 * 86400000).toISOString().split("T")[0],
-      items: req.body.items || [],
+      items,
       subtotal,
-      taxRate,
+      taxRate: req.body.taxRate !== undefined ? Number(req.body.taxRate) : 0.0,
       taxAmount,
       totalAmount,
       currency: req.body.currency || "MYR",
@@ -294,29 +328,61 @@ async function startServer() {
       return res.status(404).json({ error: "Invoice not found" });
     }
     const existing = invoices[index];
-    const subtotal = (req.body.items || []).reduce(
+    // Per-item tax (fixes wholesale invoice-level taxRate being applied).
+    const items = (req.body.items || existing.items || []).map((it: any) => ({
+      ...it,
+      taxRate: Number(it.taxRate) || 0,
+    }));
+    const subtotal = items.reduce(
       (acc, item) => acc + (Number(item.unitPrice) || 0) * (Number(item.quantity) || 1),
       0
     );
-    const taxRate = req.body.taxRate !== undefined ? Number(req.body.taxRate) : existing.taxRate;
-    const taxAmount = subtotal * taxRate;
+    const taxAmount = items.reduce(
+      (acc, item) => acc + (Number(item.amount) || (Number(item.unitPrice) || 0) * (Number(item.quantity) || 1)) * (Number(item.taxRate) || 0),
+      0
+    );
     const totalAmount = subtotal + taxAmount;
+
+    // Auto-create / match customer for manual entries on update too.
+    let customerId = req.body.customerId || existing.customerId || "";
+    const customerName = req.body.customerName || existing.customerName || "Customer Name";
+    if (!customerId && customerName && customerName !== "Customer Name") {
+      const match = customers.find((c) => c.name.toLowerCase() === customerName.toLowerCase());
+      if (match) {
+        customerId = match.id;
+      } else {
+        customerId = `cust-${Date.now()}`;
+        customers.unshift({
+          id: customerId,
+          name: customerName,
+          email: req.body.customerEmail || existing.customerEmail || "",
+          phone: req.body.customerPhone || existing.customerPhone || "",
+          address: req.body.customerAddress || existing.customerAddress || "",
+          tin: req.body.customerTin || existing.customerTin || "",
+          outstandingBalance: 0,
+          ltv: 0,
+          status: "CURRENT",
+          recentInvoices: [],
+          tenantId: req.body.tenantId || existing.tenantId,
+        });
+      }
+    }
 
     const updated: Invoice = {
       ...existing,
       invoiceNumber: req.body.invoiceNumber || existing.invoiceNumber,
       tenantId: req.body.tenantId || existing.tenantId,
-      customerId: req.body.customerId || existing.customerId,
-      customerName: req.body.customerName || existing.customerName,
+      customerId: customerId || existing.customerId,
+      customerName,
       customerEmail: req.body.customerEmail || existing.customerEmail,
       customerPhone: req.body.customerPhone || existing.customerPhone,
       customerAddress: req.body.customerAddress || existing.customerAddress,
       customerTin: req.body.customerTin || existing.customerTin,
       date: req.body.date || existing.date,
       dueDate: req.body.dueDate || existing.dueDate,
-      items: req.body.items || existing.items,
+      items,
       subtotal,
-      taxRate,
+      taxRate: req.body.taxRate !== undefined ? Number(req.body.taxRate) : existing.taxRate,
       taxAmount,
       totalAmount,
       currency: req.body.currency || existing.currency,

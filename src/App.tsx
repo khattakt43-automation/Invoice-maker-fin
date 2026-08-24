@@ -368,6 +368,13 @@ export function App() {
       })
     );
 
+    // Refresh customers so a newly auto-created customer (billed for the first
+    // time on an invoice) shows up in the Customers list immediately.
+    fetch('/api/customers')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d?.data?.length) setCustomers(d.data); })
+      .catch(() => {});
+
     // Sound + activity log (Points 7 & 9)
     playSound('invoice_generated', soundsEnabled);
     fetch('/api/activity-logs', {
