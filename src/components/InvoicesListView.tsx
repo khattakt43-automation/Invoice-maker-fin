@@ -115,11 +115,11 @@ export const InvoicesListView: React.FC<InvoicesListViewProps> = ({
   };
 
   const downloadInvoice = (inv: Invoice) => {
-    // Open the server-rendered public invoice (same branded design as the
-    // in-app preview) in a new tab so the user can Save as PDF. This keeps a
-    // single consistent invoice design (spec points 7 & 8: PDF must match preview).
+    // Open the server-rendered, branded invoice and auto-trigger the browser's
+    // "Save as PDF" dialog (via ?autoprint=1 handled server-side). This gives a
+    // true PDF download using the exact same design as the in-app preview.
     const num = (inv.invoiceNumber || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-    const url = `/i/${num}`;
+    const url = `/i/${num}?autoprint=1`;
     const w = window.open(url, '_blank');
     if (!w) {
       // Popup blocked — fall back to same-tab navigation.

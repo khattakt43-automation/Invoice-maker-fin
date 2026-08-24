@@ -374,6 +374,11 @@ export const InvoiceBuilderView: React.FC<InvoiceBuilderViewProps> = ({
       `@page { margin: 0 !important; size: A4; } @media print { * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; } #print-host { background:#fff !important; } }`;
     const src = document.getElementById('printable-invoice');
     if (!src) { window.print(); return; }
+    // IMPORTANT: remove any previously-injected print host (e.g. if afterprint
+    // never fired on a prior print). Otherwise stale clones stack and the
+    // browser prints MULTIPLE copies of the invoice. (Bug #1.)
+    const existing = document.getElementById('print-host');
+    if (existing) existing.remove();
     const clone = src.cloneNode(true) as HTMLElement;
     clone.setAttribute('id', 'printable-invoice-clone');
     clone.style.transform = 'none';

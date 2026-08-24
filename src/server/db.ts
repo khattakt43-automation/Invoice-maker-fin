@@ -257,6 +257,21 @@ function persistToDb(s: StoreShape) {
     );
     for (const p of s.products) upsertProd.run({ id: p.id, tid: p.tenantId || "", data: j(p) });
 
+    // CRITICAL: remove DB rows that no longer exist in memory. Without this a
+    // deleted invoice/customer/tenant/ product stays in the SQLite table and
+    // reappears after a refresh. (Bug #3: deleted data not persisting.)
+    const syncTable = (table: string, rows: { id: string }[]) => {
+      const liveIds = rows.map((r) => r.id);
+      const all = db.prepare(`SELECT id FROM ${table}`).all() as { id: string }[];
+      const stale = all.map((r) => r.id).filter((id) => !liveIds.includes(id));
+      const del = db.prepare(`DELETE FROM ${table} WHERE id = ?`);
+      for (const id of stale) del.run(id);
+    };
+    syncTable("invoices", s.invoices);
+    syncTable("customers", s.customers);
+    syncTable("tenants", s.tenants);
+    syncTable("products", s.products);
+
     const metaKeys = [
       "platformKPIs",
       "retainerPlans",

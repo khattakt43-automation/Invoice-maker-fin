@@ -670,10 +670,16 @@ async function startServer() {
     const tenant = tenants.find((t) => t.id === inv.tenantId) || initialTenants[0];
     const cust = customers.find((c) => c.id === inv.customerId);
     const html = renderInvoiceHtml(inv, tenant, cust);
+    // ?autoprint=1 -> immediately invoke the browser's print/save-as-PDF dialog
+    // so the download button produces a real PDF (Bug #2).
+    const autoPrint = req.query.autoprint === "1";
+    const finalHtml = autoPrint
+      ? html.replace("</body>", "<script>window.onload=function(){setTimeout(function(){window.print();},250);};</script></body>")
+      : html;
     res.setHeader("Content-Type", "text/html");
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
     res.setHeader("Pragma", "no-cache");
-    res.send(html);
+    res.send(finalHtml);
   });
 
   // ---------------------------------------------------------------------------
