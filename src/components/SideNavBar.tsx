@@ -16,7 +16,9 @@ import {
   CreditCard,
   Sliders,
   LogOut,
-  Repeat
+  Repeat,
+  History as HistoryIcon,
+  MessageSquare,
 } from 'lucide-react';
 import { Tenant, UserRole } from '../types';
 
@@ -40,17 +42,30 @@ export const SideNavBar: React.FC<SideNavBarProps> = ({
   onSwitchRole,
   onOpenSupportModal,
   onLogout,
+  isOpen = false,
+  onClose,
 }) => {
   const isSuperAdmin = currentRole === 'super_admin';
 
   return (
+    <>
+    {/* Mobile close overlay (sibling of sidebar so it never blocks nav clicks) */}
+    {isOpen && (
+      <div
+        className="fixed inset-0 bg-black/40 z-40 lg:hidden"
+        onClick={onClose}
+        aria-hidden="true"
+      />
+    )}
     <aside
       id="main-sidebar"
-      className={`w-64 h-screen fixed left-0 top-0 z-50 flex flex-col border-r transition-colors duration-200 ${
+      className={`w-64 h-screen fixed left-0 top-0 z-50 flex flex-col border-r transition-transform duration-300 ease-in-out ${
         isSuperAdmin
           ? 'bg-[#213145] text-[#eaf1ff] border-[#bdcac0]/20'
           : 'bg-[#f8f9ff] text-[#0b1c30] border-[#bdcac0]/60'
-      }`}
+      } ${
+        isOpen ? 'translate-x-0' : '-translate-x-full'
+      } lg:translate-x-0`}
     >
       {/* Brand Header */}
       <div className={`p-4 flex items-center gap-3 border-b ${isSuperAdmin ? 'border-[#bdcac0]/20' : 'border-[#bdcac0]/40'}`}>
@@ -216,6 +231,44 @@ export const SideNavBar: React.FC<SideNavBarProps> = ({
               <Settings className="w-4 h-4 shrink-0" />
               <span>Settings</span>
             </button>
+            <button
+              id="nav-user-logs"
+              onClick={() => setActiveTab('user-logs')}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl font-medium text-sm transition-all duration-150 ${
+                activeTab === 'user-logs'
+                  ? 'bg-[#00855a]/10 text-[#006a46] font-bold border-r-4 border-[#006a46]'
+                  : 'text-[#545f73] hover:text-[#0b1c30] hover:bg-[#eff4ff]'
+              }`}
+            >
+              <HistoryIcon className="w-4 h-4 shrink-0" />
+              <span>User Logs</span>
+            </button>
+
+            <button
+              id="nav-whatsapp"
+              onClick={() => setActiveTab('whatsapp')}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl font-medium text-sm transition-all duration-150 ${
+                activeTab === 'whatsapp'
+                  ? 'bg-[#00855a]/10 text-[#006a46] font-bold border-r-4 border-[#006a46]'
+                  : 'text-[#545f73] hover:text-[#0b1c30] hover:bg-[#eff4ff]'
+              }`}
+            >
+              <MessageSquare className="w-4 h-4 shrink-0" />
+              <span>WhatsApp</span>
+            </button>
+
+            <button
+              id="nav-plan"
+              onClick={() => setActiveTab('plan')}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl font-medium text-sm transition-all duration-150 ${
+                activeTab === 'plan'
+                  ? 'bg-[#00855a]/10 text-[#006a46] font-bold border-r-4 border-[#006a46]'
+                  : 'text-[#545f73] hover:text-[#0b1c30] hover:bg-[#eff4ff]'
+              }`}
+            >
+              <CreditCard className="w-4 h-4 shrink-0" />
+              <span>My Plan</span>
+            </button>
 
             <button
               id="nav-tenant-signin"
@@ -297,6 +350,31 @@ export const SideNavBar: React.FC<SideNavBarProps> = ({
               <Sliders className="w-4 h-4 shrink-0" />
               <span>System Settings</span>
             </button>
+            <button
+              id="nav-admin-templates"
+              onClick={() => setActiveTab('admin-templates')}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl font-medium text-sm transition-all duration-150 ${
+                activeTab === 'admin-templates'
+                  ? 'bg-[#00855a]/30 text-[#8bf8c2] font-bold border-r-4 border-[#6edba7]'
+                  : 'text-[#bcc7de] hover:text-white hover:bg-white/5'
+              }`}
+            >
+              <Layers className="w-4 h-4 shrink-0" />
+              <span>Templates (Draft)</span>
+            </button>
+
+            <button
+              id="nav-admin-whatsapp"
+              onClick={() => setActiveTab('admin-whatsapp')}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl font-medium text-sm transition-all duration-150 ${
+                activeTab === 'admin-whatsapp'
+                  ? 'bg-[#00855a]/30 text-[#8bf8c2] font-bold border-r-4 border-[#6edba7]'
+                  : 'text-[#bcc7de] hover:text-white hover:bg-white/5'
+              }`}
+            >
+              <MessageSquare className="w-4 h-4 shrink-0" />
+              <span>WhatsApp</span>
+            </button>
           </>
         )}
       </nav>
@@ -377,5 +455,6 @@ export const SideNavBar: React.FC<SideNavBarProps> = ({
         )}
       </div>
     </aside>
+    </>
   );
 };

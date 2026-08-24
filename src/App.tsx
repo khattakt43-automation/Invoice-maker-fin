@@ -26,6 +26,7 @@ import { RetainerPlansView } from './components/RetainerPlansView';
 import { SuperAdminOverviewView } from './components/SuperAdminOverviewView';
 import { TenantsManagementView } from './components/TenantsManagementView';
 import { TenantSettingsView } from './components/TenantSettingsView';
+import { TenantProfileView } from './components/TenantProfileView';
 import { ProductsView } from './components/ProductsView';
 import { ReportsView } from './components/ReportsView';
 import { TenantSignInView } from './components/TenantSignInView';
@@ -33,12 +34,22 @@ import { AuthSignInView } from './components/AuthSignInView';
 import { AdminProfileView } from './components/AdminProfileView';
 import { ImpersonateModal } from './components/ImpersonateModal';
 import { SupportModal } from './components/SupportModal';
+import { ChangesView } from './components/ChangesView';
+import { TemplatesAdminView } from './components/TemplatesAdminView';
+import { UserLogsView } from './components/UserLogsView';
+import { WhatsAppAdminView } from './components/WhatsAppAdminView';
+import { WhatsAppTenantView } from './components/WhatsAppTenantView';
+import { TenantPlanView } from './components/TenantPlanView';
+import { playSound } from './utils/sound';
 
 export function App() {
   // App state
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(true);
   const [currentRole, setCurrentRole] = useState<UserRole>('business_admin');
   const [activeTab, setActiveTab] = useState<string>('dashboard');
+  // Back-context: remembers where an invoice edit was launched from
+  const [returnTab, setReturnTab] = useState<string>('invoices');
+  const [returnCustomerId, setReturnCustomerId] = useState<string | null>(null);
   const [tenants, setTenants] = useState<Tenant[]>(initialTenants);
   const [activeTenant, setActiveTenant] = useState<Tenant>(initialTenants[0]);
   const [customers, setCustomers] = useState<Customer[]>(initialCustomers);
@@ -77,6 +88,38 @@ export function App() {
   // Modals
   const [isImpersonateOpen, setIsImpersonateOpen] = useState(false);
   const [isSupportOpen, setIsSupportOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [soundsEnabled, setSoundsEnabled] = useState<boolean>(() => {
+    const saved = localStorage.getItem('billah_sounds_enabled');
+    return saved ? saved === 'true' : true;
+  });
+  const [toast, setToast] = useState<string | null>(null);
+
+  const handleNavigate = (tab: string) => {
+    setActiveTab(tab);
+    setSidebarOpen(false);
+  };
+
+  const toggleSounds = (val: boolean) => {
+    setSoundsEnabled(val);
+    localStorage.setItem('billah_sounds_enabled', String(val));
+  };
+
+  // Notification bell click -> navigate to the relevant page/location (Point 6)
+  const handleNotificationNavigate = (link?: { tab: string; customerId?: string; invoiceId?: string }) => {
+    if (!link) return;
+    if (link.customerId) setReturnCustomerId(link.customerId);
+    if (link.invoiceId) {
+      const inv = invoices.find((i) => i.id === link.invoiceId || i.invoiceNumber === link.invoiceId);
+      if (inv) {
+        setSelectedInvoice(inv);
+        setActiveTab('create-invoice');
+        return;
+      }
+    }
+    setActiveTab(link.tab);
+    setSidebarOpen(false);
+  };
 
   // Fetch initial data from backend API if available
   useEffect(() => {
@@ -162,9 +205,13 @@ export function App() {
     setCurrentRole(role);
     if (role === 'business_admin' && tenant) {
       setActiveTenant(tenant);
-      setActiveTab('dashboard');
+      // Tenant users land directly on Create Invoice (their primary action).
+      setActiveTab('create-invoice');
     } else if (role === 'super_admin') {
       setActiveTab('admin-overview');
+    } else {
+      // Non-impersonated tenant keeps dashboard fallback for safety.
+      setActiveTab('create-invoice');
     }
   };
 
@@ -188,24 +235,34 @@ export function App() {
   const handleUpdateTenant = (updated: Tenant) => {
     setActiveTenant(updated);
     setTenants((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+    // Persist to the server so defaults survive restart (PATCH /api/tenants/:id)
+    fetch(`/api/tenants/${updated.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updated),
+    }).catch(() => {});
   };
 
   // Create invoice click
-  const handleCreateInvoiceClick = () => {
+  const handleCreateInvoiceClick = (returnTo: string = 'invoices', customerId: string | null = null) => {
     setSelectedInvoice(null);
+    setReturnTab(returnTo);
+    setReturnCustomerId(customerId);
     setActiveTab('create-invoice');
   };
 
   // Select existing invoice to view/edit
-  const handleSelectInvoice = (inv: Invoice) => {
+  const handleSelectInvoice = (inv: Invoice, returnTo: string = 'invoices', customerId: string | null = null) => {
     setSelectedInvoice(inv);
+    setReturnTab(returnTo);
+    setReturnCustomerId(customerId);
     setActiveTab('create-invoice');
   };
 
   // Create invoice for a specific customer
   const handleNewInvoiceForCustomer = (cust: Customer) => {
     const freshInv: Invoice = {
-      id: `inv-${Date.now()}`,
+      id: 'NEW',
       invoiceNumber: generateUniqueInvoiceNumber(invoices),
       tenantId: activeTenant.id,
       customerId: cust.id,
@@ -239,6 +296,8 @@ export function App() {
       paymentTerms: 'Payment due in 30 days.',
     };
     setSelectedInvoice(freshInv);
+    setReturnTab('customers');
+    setReturnCustomerId(cust.id);
     setActiveTab('create-invoice');
   };
 
@@ -270,6 +329,44 @@ export function App() {
         return c;
       })
     );
+
+    // Sound + activity log (Points 7 & 9)
+    playSound('invoice_generated', soundsEnabled);
+    fetch('/api/activity-logs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tenantId: activeTenant.id,
+        actor: activeTenant.name,
+        action: savedInv.id && !String(savedInv.id).startsWith('inv-') ? 'invoice.updated' : 'invoice.created',
+        detail: `Invoice ${savedInv.invoiceNumber}`,
+        severity: 'success',
+      }),
+    }).catch(() => {});
+  };
+
+  const handleInvoiceDeleted = (invoiceId: string) => {
+    setInvoices((prev) => prev.filter((i) => i.id !== invoiceId));
+    playSound('invoice_deleted', soundsEnabled);
+  };
+
+  // Bulk delete invoices (and sync customer recentInvoices)
+  const handleInvoicesBulkDeleted = (ids: string[]) => {
+    const idSet = new Set(ids);
+    setInvoices((prev) => prev.filter((i) => !idSet.has(i.id)));
+    setCustomers((prev) =>
+      prev.map((c) =>
+        c.recentInvoices
+          ? { ...c, recentInvoices: c.recentInvoices.filter((r) => !idSet.has(r.id)) }
+          : c
+      )
+    );
+  };
+
+  const handleCustomersBulkDeleted = (ids: string[]) => {
+    const idSet = new Set(ids);
+    setCustomers((prev) => prev.filter((c) => !idSet.has(c.id)));
+    setInvoices((prev) => prev.filter((i) => !idSet.has(i.customerId)));
   };
 
   // Invoice status change from table
@@ -291,6 +388,10 @@ export function App() {
   // Add customer
   const handleCustomerAdded = (newCust: Customer) => {
     setCustomers((prev) => [newCust, ...prev]);
+  };
+
+  const handleCustomerDeleted = (customerId: string) => {
+    setCustomers((prev) => prev.filter((c) => c.id !== customerId));
   };
 
   // Add tenant
@@ -338,16 +439,18 @@ export function App() {
       <SideNavBar
         currentRole={currentRole}
         activeTab={activeTab}
-        setActiveTab={setActiveTab}
+        setActiveTab={handleNavigate}
         activeTenant={activeTenant}
         onCreateInvoiceClick={handleCreateInvoiceClick}
         onSwitchRole={handleSwitchRole}
         onOpenSupportModal={() => setIsSupportOpen(true)}
         onLogout={handleLogout}
+        isOpen={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
       />
 
       {/* Main Content Area */}
-      <div className="flex-1 ml-64 min-w-0 flex flex-col min-h-screen">
+      <div className="flex-1 lg:ml-64 min-w-0 flex flex-col min-h-screen">
         {/* Top App Bar */}
         <TopAppBar
           currentRole={currentRole}
@@ -357,11 +460,36 @@ export function App() {
           onOpenSupport={() => setIsSupportOpen(true)}
           onCreateInvoice={handleCreateInvoiceClick}
           onLogout={handleLogout}
-          onNavigateToTab={setActiveTab}
+          onNavigateToTab={handleNavigate}
+          onToggleSidebar={() => setSidebarOpen((p) => !p)}
+          onNotificationNavigate={handleNotificationNavigate}
+          soundsEnabled={soundsEnabled}
         />
 
         {/* Dynamic Route/Tab Views */}
         <main className="flex-1 pb-16">
+          {/* User-scoped & admin WhatsApp views placed before the role-gated
+              fragments so they always render regardless of role gating */}
+          {activeTab === 'user-logs' && (
+            <UserLogsView tenantId={activeTenant.id} actor={activeTenant.name} />
+          )}
+
+          {activeTab === 'whatsapp' && (
+            <WhatsAppTenantView tenantId={activeTenant.id} tenantName={activeTenant.name} />
+          )}
+
+          {activeTab === 'plan' && (
+            <TenantPlanView tenant={activeTenant} onToast={(m) => setToast(m)} />
+          )}
+
+          {activeTab === 'admin-whatsapp' && (
+            <WhatsAppAdminView
+              tenants={tenants}
+              currentTenantId={activeTenant.id}
+              onToast={(m) => setToast(m)}
+            />
+          )}
+
           {/* Business Portal Views */}
           {currentRole === 'business_admin' && (
             <>
@@ -381,6 +509,8 @@ export function App() {
                   onCreateInvoice={handleCreateInvoiceClick}
                   onSelectInvoice={handleSelectInvoice}
                   onStatusChange={handleInvoiceStatusChange}
+                  onInvoiceDeleted={handleInvoiceDeleted}
+                  onInvoicesBulkDeleted={handleInvoicesBulkDeleted}
                 />
               )}
 
@@ -391,8 +521,12 @@ export function App() {
                   products={products}
                   existingInvoices={invoices}
                   initialInvoice={selectedInvoice}
-                  onBack={() => setActiveTab('invoices')}
+                  onBack={() => setActiveTab(returnTab)}
+                  returnCustomerId={returnCustomerId}
                   onInvoiceSaved={handleInvoiceSaved}
+                  onSetDefaultTitle={(title, size) => {
+                    handleUpdateTenant({ ...activeTenant, defaultDocTitle: title, defaultDocTitleSize: size });
+                  }}
                 />
               )}
 
@@ -400,8 +534,11 @@ export function App() {
                 <CustomersView
                   customers={customers}
                   invoices={invoices}
+                  openCustomerId={returnCustomerId}
                   onNewInvoiceForCustomer={handleNewInvoiceForCustomer}
                   onCustomerAdded={handleCustomerAdded}
+                  onCustomerDeleted={handleCustomerDeleted}
+                  onCustomersBulkDeleted={handleCustomersBulkDeleted}
                   onSelectInvoice={handleSelectInvoice}
                 />
               )}
@@ -426,27 +563,16 @@ export function App() {
                 <TenantSettingsView
                   tenant={activeTenant}
                   onUpdateTenant={handleUpdateTenant}
+                  soundsEnabled={soundsEnabled}
+                  onToggleSounds={toggleSounds}
                 />
               )}
 
               {activeTab === 'profile' && (
-                <div className="p-6 lg:p-8 max-w-4xl mx-auto space-y-6">
-                  <h2 className="text-3xl font-bold text-[#0b1c30]">Tenant Admin Profile</h2>
-                  <div className="bg-white p-6 rounded-2xl border border-[#bdcac0]/60 shadow-xs space-y-4">
-                    <div className="flex items-center gap-4">
-                      <div className="w-16 h-16 rounded-2xl bg-[#00855a] text-white flex items-center justify-center font-bold text-xl font-mono">
-                        {activeTenant.initials}
-                      </div>
-                      <div>
-                        <h3 className="text-xl font-bold text-[#0b1c30]">{activeTenant.adminName}</h3>
-                        <p className="text-xs text-[#545f73]">{activeTenant.adminEmail} • {activeTenant.phone}</p>
-                        <span className="inline-block mt-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-[#00855a]/15 text-[#006a46] uppercase">
-                          {activeTenant.plan} Plan
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
+                <TenantProfileView
+                  tenant={activeTenant}
+                  onUpdateTenant={handleUpdateTenant}
+                />
               )}
 
               {(activeTab === 'tenant-signin' || activeTab === 'auth-signin') && (
@@ -559,6 +685,10 @@ export function App() {
                 />
               )}
 
+              {activeTab === 'admin-templates' && (
+                <TemplatesAdminView onNavigateToTab={setActiveTab} />
+              )}
+
               {(activeTab === 'tenant-signin' || activeTab === 'auth-signin') && (
                 <AuthSignInView
                   tenants={tenants}
@@ -583,6 +713,13 @@ export function App() {
 
       {/* Support Modal */}
       <SupportModal isOpen={isSupportOpen} onClose={() => setIsSupportOpen(false)} />
+
+      {/* Lightweight toast for WhatsApp admin actions */}
+      {toast && (
+        <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-[100] bg-[#0b1c30] text-white text-sm px-4 py-2.5 rounded-lg shadow-lg">
+          {toast}
+        </div>
+      )}
     </div>
   );
 }

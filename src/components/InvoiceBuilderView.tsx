@@ -25,7 +25,9 @@ interface InvoiceBuilderViewProps {
   existingInvoices?: Invoice[];
   initialInvoice?: Invoice | null;
   onBack: () => void;
+  returnCustomerId?: string | null;
   onInvoiceSaved: (invoice: Invoice) => void;
+  onSetDefaultTitle?: (title: string, size: number) => void;
 }
 
 export const InvoiceBuilderView: React.FC<InvoiceBuilderViewProps> = ({
@@ -36,6 +38,7 @@ export const InvoiceBuilderView: React.FC<InvoiceBuilderViewProps> = ({
   initialInvoice,
   onBack,
   onInvoiceSaved,
+  onSetDefaultTitle,
 }) => {
   // Form State
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>(
@@ -87,6 +90,36 @@ export const InvoiceBuilderView: React.FC<InvoiceBuilderViewProps> = ({
     initialInvoice?.paymentTerms || `Payment due in 30 days. ${tenant.bankName} Acc: ${tenant.bankAccount}`
   );
 
+  // Per-invoice document title (header) + show/hide toggle (Point 5)
+  const [docTitle, setDocTitle] = useState(initialInvoice?.docTitle || tenant.invoiceTitle || tenant.defaultDocTitle || 'Tax Invoice');
+  const [showDocTitle, setShowDocTitle] = useState<boolean>(
+    initialInvoice ? initialInvoice.showDocTitle !== false : true
+  );
+  const [docTitleSize, setDocTitleSize] = useState<number>(
+    initialInvoice?.docTitleSize || tenant.defaultDocTitleSize || 30
+  );
+  // Notes & Payment Terms text alignment (Point 10)
+  const [notesAlign, setNotesAlign] = useState<'left' | 'center' | 'right'>(
+    initialInvoice?.notesAlign || 'left'
+  );
+  // QR code (Point 12)
+  const [qrData, setQrData] = useState(initialInvoice?.qrData || '');
+  const [qrSize, setQrSize] = useState<number>(initialInvoice?.qrSize || 110);
+  const [qrAlign, setQrAlign] = useState<'left' | 'center' | 'right'>(
+    initialInvoice?.qrAlign || 'right'
+  );
+
+  // Paper size dimensions (CSS px @96dpi) + currency formatter (Points 1 & 3)
+  const PAPER: Record<string, { w: number; h: number; label: string }> = {
+    'A4 (Standard)': { w: 794, h: 1123, label: '210mm × 297mm Standard' },
+    'A5': { w: 559, h: 794, label: '148mm × 210mm' },
+    'Letter': { w: 816, h: 1056, label: '8.5in × 11in' },
+    'Legal': { w: 816, h: 1344, label: '8.5in × 14in' },
+  };
+  const CURRENCY_SYMBOL: Record<string, string> = { MYR: 'RM', USD: '$', SGD: 'S$', EUR: '€' };
+  const fmt = (n: number) =>
+    `${CURRENCY_SYMBOL[currency] || ''} ${Number(n || 0).toLocaleString('en-MY', { minimumFractionDigits: 2 })}`;
+
   // Line items
   const [items, setItems] = useState<InvoiceItem[]>(
     initialInvoice?.items?.length
@@ -94,13 +127,23 @@ export const InvoiceBuilderView: React.FC<InvoiceBuilderViewProps> = ({
       : [
           {
             id: 'item-1',
-            description: '',
-            quantity: 1,
-            size: '',
-            sizeUnit: '',
-            unitPrice: 0,
-            taxRate: 0,
-            amount: 0,
+            description: 'Industrial Grade Fiber Optic Cabling',
+            quantity: 100,
+            size: '100',
+            sizeUnit: 'meter',
+            unitPrice: 45.0,
+            taxRate: 0.0,
+            amount: 4500.0,
+          },
+          {
+            id: 'item-2',
+            description: 'Structured Network Trenching & Conduit',
+            quantity: 40,
+            size: '40',
+            sizeUnit: 'meter',
+            unitPrice: 85.0,
+            taxRate: 0.0,
+            amount: 3400.0,
           },
         ]
   );
@@ -127,6 +170,12 @@ export const InvoiceBuilderView: React.FC<InvoiceBuilderViewProps> = ({
       setStatus(initialInvoice.status || 'Unpaid');
       setNotes(initialInvoice.notes || '');
       setPaymentTerms(initialInvoice.paymentTerms || '');
+      setDocTitle(initialInvoice.docTitle || tenant.invoiceTitle || 'Tax Invoice');
+      setShowDocTitle(initialInvoice ? initialInvoice.showDocTitle !== false : true);
+      setNotesAlign(initialInvoice.notesAlign || 'left');
+      setQrData(initialInvoice.qrData || '');
+      setQrSize(initialInvoice.qrSize || 110);
+      setQrAlign(initialInvoice.qrAlign || 'right');
       if (initialInvoice.items?.length) {
         setItems(initialInvoice.items);
       }
@@ -245,27 +294,148 @@ export const InvoiceBuilderView: React.FC<InvoiceBuilderViewProps> = ({
     notes,
     paperSize,
     paymentTerms,
+    docTitle,
+    showDocTitle,
+    docTitleSize,
+    notesAlign,
+    qrData,
+    qrSize,
+    qrAlign,
+  };
+
+  // ---- Draft auto-save (Point 4) ----
+  // Continuously persists the working invoice to localStorage so navigation,
+  // refresh or accidental leave never loses data. Restored on return.
+  const draftKey = `billah_draft_${initialInvoice && initialInvoice.id !== 'NEW' ? initialInvoice.id : 'NEW'}`;
+  const isNewDraft = !initialInvoice || initialInvoice.id === 'NEW';
+
+  // Restore an existing autosaved draft when creating a brand-new invoice.
+  useEffect(() => {
+    if (!isNewDraft) return;
+    try {
+      const raw = localStorage.getItem(draftKey);
+      if (raw) {
+        const d = JSON.parse(raw);
+        if (d.docTitle) setDocTitle(d.docTitle);
+        if (d.docTitleSize) setDocTitleSize(d.docTitleSize);
+        // restore scalar fields safely
+        if (d.invoiceNumber) setInvoiceNumber(d.invoiceNumber);
+        if (d.customerName) setCustomerName(d.customerName);
+        if (d.customerEmail) setCustomerEmail(d.customerEmail);
+        if (d.customerPhone) setCustomerPhone(d.customerPhone);
+        if (d.customerAddress) setCustomerAddress(d.customerAddress);
+        if (d.customerTin) setCustomerTin(d.customerTin);
+        if (d.date) setDate(d.date);
+        if (d.dueDate) setDueDate(d.dueDate);
+        if (d.notes) setNotes(d.notes);
+        if (d.paymentTerms) setPaymentTerms(d.paymentTerms);
+        if (d.currency) setCurrency(d.currency);
+        if (d.paperSize) setPaperSize(d.paperSize);
+        if (d.status) setStatus(d.status);
+        if (Array.isArray(d.items) && d.items.length) setItems(d.items);
+        if (d.qrData !== undefined) setQrData(d.qrData);
+        if (d.qrSize) setQrSize(d.qrSize);
+        if (d.notesAlign) setNotesAlign(d.notesAlign);
+        if (d.showDocTitle !== undefined) setShowDocTitle(d.showDocTitle);
+      }
+    } catch { /* ignore corrupt draft */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Persist on every change (debounced) + on unload.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      try { localStorage.setItem(draftKey, JSON.stringify(currentInvoiceData)); } catch { /* quota */ }
+    }, 400);
+    return () => clearTimeout(t);
+  }, [currentInvoiceData, draftKey]);
+
+  useEffect(() => {
+    const onUnload = () => {
+      try { localStorage.setItem(draftKey, JSON.stringify(currentInvoiceData)); } catch { /* ignore */ }
+    };
+    window.addEventListener('beforeunload', onUnload);
+    return () => window.removeEventListener('beforeunload', onUnload);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentInvoiceData, draftKey]);
+
+
+  // Print the invoice exactly as shown in the preview (clone the live sheet, strip
+  // the responsive wrapper, inject zero-margin @page so it matches the preview 1:1).
+  const handlePrint = () => {
+    const styleId = 'print-edge-style';
+    let styleEl = document.getElementById(styleId) as HTMLStyleElement | null;
+    if (!styleEl) {
+      styleEl = document.createElement('style');
+      styleEl.id = styleId;
+      document.head.appendChild(styleEl);
+    }
+    styleEl.textContent =
+      `@page { margin: 0 !important; size: A4; } @media print { * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; } #print-host { background:#fff !important; } }`;
+    const src = document.getElementById('printable-invoice');
+    if (!src) { window.print(); return; }
+    const clone = src.cloneNode(true) as HTMLElement;
+    clone.setAttribute('id', 'printable-invoice-clone');
+    clone.style.transform = 'none';
+    clone.style.transformOrigin = 'top left';
+    clone.style.width = '794px';
+    clone.style.maxWidth = '794px';
+    clone.style.position = 'static';
+    clone.style.left = '0';
+    clone.style.top = '0';
+    clone.style.margin = '0 auto';
+    clone.style.boxShadow = 'none';
+    clone.style.borderRadius = '0';
+    const host = document.createElement('div');
+    host.id = 'print-host';
+    host.style.position = 'fixed';
+    host.style.left = '0';
+    host.style.top = '0';
+    host.style.width = '100%';
+    host.style.background = '#fff';
+    host.style.zIndex = '2147483647';
+    host.appendChild(clone);
+    document.body.appendChild(host);
+    const cleanup = () => {
+      const h = document.getElementById('print-host');
+      if (h) h.remove();
+      document.removeEventListener('afterprint', cleanup);
+    };
+    document.addEventListener('afterprint', cleanup);
+    setTimeout(() => { window.print(); }, 60);
   };
 
   const handleSaveInvoice = async (printAfter = false) => {
     setIsSaving(true);
+    const isExisting = Boolean(
+      initialInvoice?.id && initialInvoice.id !== 'NEW'
+    );
     try {
-      const res = await fetch('/api/invoices', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(currentInvoiceData),
-      });
+      const res = await fetch(
+        isExisting ? `/api/invoices/${initialInvoice!.id}` : '/api/invoices',
+        {
+          method: isExisting ? 'PUT' : 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(currentInvoiceData),
+        }
+      );
       const data = await res.json();
       onInvoiceSaved(data.data || currentInvoiceData);
+      try { localStorage.removeItem(draftKey); } catch { /* ignore */ }
       setSavedBanner(true);
       setTimeout(() => setSavedBanner(false), 3000);
-      if (printAfter) {
-        window.print();
+      // Auto-return to the originating page (e.g. back to the customer)
+      if (!printAfter) {
+        setTimeout(() => onBack(), 350);
+      } else {
+        handlePrint();
       }
     } catch (err) {
       onInvoiceSaved(currentInvoiceData);
+      try { localStorage.removeItem(draftKey); } catch { /* ignore */ }
       setSavedBanner(true);
-      if (printAfter) window.print();
+      if (printAfter) handlePrint();
+      else setTimeout(() => onBack(), 350);
     } finally {
       setIsSaving(false);
     }
@@ -342,7 +512,7 @@ export const InvoiceBuilderView: React.FC<InvoiceBuilderViewProps> = ({
             <h3 className="text-xs font-bold uppercase tracking-wider text-[#006a46] flex items-center gap-1.5">
               <FileText className="w-4 h-4" /> Document Settings
             </h3>
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
               <div>
                 <label className="block text-[11px] font-semibold text-[#545f73] uppercase mb-1">
                   Status
@@ -371,6 +541,7 @@ export const InvoiceBuilderView: React.FC<InvoiceBuilderViewProps> = ({
                   <option value="MYR">MYR (RM)</option>
                   <option value="USD">USD ($)</option>
                   <option value="SGD">SGD (S$)</option>
+                  <option value="EUR">EUR (€)</option>
                 </select>
               </div>
 
@@ -386,7 +557,116 @@ export const InvoiceBuilderView: React.FC<InvoiceBuilderViewProps> = ({
                   <option value="A4 (Standard)">A4 (Standard)</option>
                   <option value="A5">A5</option>
                   <option value="Letter">Letter</option>
+                  <option value="Legal">Legal</option>
                 </select>
+              </div>
+            </div>
+
+            {/* Invoice Header & Document Title (Point 5) */}
+            <div className="space-y-2 border-t border-[#bdcac0]/40 pt-3">
+              <div className="flex items-center justify-between">
+                <label className="text-[11px] font-semibold text-[#545f73] uppercase">Document Title (Header)</label>
+                <label className="flex items-center gap-2 text-[11px] text-[#545f73] cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={showDocTitle}
+                    onChange={(e) => setShowDocTitle(e.target.checked)}
+                    className="w-4 h-4 accent-[#006a46]"
+                  />
+                  Show on invoice
+                </label>
+              </div>
+              <input
+                type="text"
+                value={docTitle}
+                onChange={(e) => setDocTitle(e.target.value)}
+                placeholder="Tax Invoice / Commercial Invoice / Receipt"
+                className="w-full bg-[#f4f8ff] border border-[#bdcac0] rounded-lg p-2 text-xs font-semibold text-[#0b1c30] outline-none"
+              />
+              <div className="flex items-center gap-3 pt-1">
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] text-[#545f73]">Size</span>
+                  <input
+                    type="range"
+                    min={16}
+                    max={72}
+                    value={docTitleSize}
+                    onChange={(e) => setDocTitleSize(Number(e.target.value))}
+                    className="w-28 accent-[#006a46]"
+                  />
+                  <span className="text-[11px] font-mono text-[#0b1c30] w-10">{docTitleSize}px</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onSetDefaultTitle?.(docTitle, docTitleSize)}
+                  className="text-[11px] font-semibold text-[#006a46] border border-[#00855a]/30 px-2.5 py-1 rounded-lg hover:bg-[#00855a]/5 transition-colors cursor-pointer"
+                  title="Save this title & size as the permanent default for future invoices"
+                >
+                  Set as Default
+                </button>
+              </div>
+              {tenant.defaultDocTitle && (
+                <p className="text-[10px] text-[#006a46]">
+                  Default: <strong>{tenant.defaultDocTitle}</strong>{tenant.defaultDocTitleSize ? ` (${tenant.defaultDocTitleSize}px)` : ''}
+                </p>
+              )}
+            </div>
+
+            {/* Notes & Payment Terms alignment (Point 10) */}
+            <div className="space-y-1 border-t border-[#bdcac0]/40 pt-3">
+              <label className="block text-[11px] font-semibold text-[#545f73] uppercase mb-1">Notes / Payment Terms Alignment</label>
+              <div className="flex gap-2">
+                {(['left', 'center', 'right'] as const).map((a) => (
+                  <button
+                    key={a}
+                    type="button"
+                    onClick={() => setNotesAlign(a)}
+                    className={`flex-1 px-2 py-1.5 rounded-lg text-xs font-semibold border ${
+                      notesAlign === a
+                        ? 'bg-[#006a46] text-white border-[#006a46]'
+                        : 'bg-[#f8f9ff] text-[#0b1c30] border-[#bdcac0]'
+                    }`}
+                  >
+                    {a.charAt(0).toUpperCase() + a.slice(1)}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* QR Code (Point 12) */}
+            <div className="space-y-2 border-t border-[#bdcac0]/40 pt-3">
+              <label className="block text-[11px] font-semibold text-[#545f73] uppercase mb-1">QR Code</label>
+              <input
+                type="text"
+                value={qrData}
+                onChange={(e) => setQrData(e.target.value)}
+                placeholder="QR content (URL, text, payment link...)"
+                className="w-full bg-[#f8f9ff] border border-[#bdcac0] rounded-lg p-2 text-xs font-semibold text-[#0b1c30] outline-none"
+              />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[10px] font-semibold text-[#545f73] uppercase mb-1">Size (px)</label>
+                  <input
+                    type="number"
+                    min={60}
+                    max={300}
+                    value={qrSize}
+                    onChange={(e) => setQrSize(Number(e.target.value))}
+                    className="w-full bg-[#f8f9ff] border border-[#bdcac0] rounded-lg p-2 text-xs text-[#0b1c30] outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-semibold text-[#545f73] uppercase mb-1">Align</label>
+                  <select
+                    value={qrAlign}
+                    onChange={(e) => setQrAlign(e.target.value as any)}
+                    className="w-full bg-[#f8f9ff] border border-[#bdcac0] rounded-lg p-2 text-xs font-semibold text-[#0b1c30] outline-none"
+                  >
+                    <option value="left">Left</option>
+                    <option value="center">Center</option>
+                    <option value="right">Right</option>
+                  </select>
+                </div>
               </div>
             </div>
           </div>
@@ -433,7 +713,7 @@ export const InvoiceBuilderView: React.FC<InvoiceBuilderViewProps> = ({
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label className="block text-[11px] font-semibold text-[#545f73] uppercase mb-1">
                   Customer Phone / WhatsApp Number
@@ -461,7 +741,7 @@ export const InvoiceBuilderView: React.FC<InvoiceBuilderViewProps> = ({
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label className="block text-[11px] font-semibold text-[#545f73] uppercase mb-1">
                   Invoice Number
@@ -728,7 +1008,7 @@ export const InvoiceBuilderView: React.FC<InvoiceBuilderViewProps> = ({
           <div className="text-center mb-2 flex items-center justify-between px-2">
             <span className="text-xs font-bold uppercase tracking-wider text-[#545f73]">Live A4 Paper Sheet Preview</span>
             <span className="text-[11px] font-mono text-[#006a46] font-semibold bg-[#eff4ff] px-2 py-0.5 rounded">
-              210mm × 297mm Standard
+              {PAPER[paperSize]?.label || '210mm × 297mm Standard'}
             </span>
           </div>
 
@@ -736,7 +1016,11 @@ export const InvoiceBuilderView: React.FC<InvoiceBuilderViewProps> = ({
           <div
             id="printable-invoice"
             className="bg-white rounded-xl border border-[#bdcac0] shadow-2xl p-8 sm:p-12 text-[#0b1c30] font-sans relative overflow-hidden transition-all"
-            style={{ minHeight: paperSize === 'A5' ? '595px' : paperSize === 'Letter' ? '1056px' : paperSize === 'Legal' ? '1344px' : '842px', width: paperSize === 'A5' ? '420px' : '794px' }}
+            style={{
+              width: PAPER[paperSize]?.w ? `${PAPER[paperSize].w}px` : '794px',
+              minHeight: PAPER[paperSize]?.h ? `${PAPER[paperSize].h}px` : '842px',
+              maxWidth: '100%',
+            }}
           >
             {/* Status watermark */}
             <div className="absolute right-12 top-24 pointer-events-none select-none opacity-10 font-mono text-7xl font-black uppercase transform rotate-12 border-8 border-current px-6 py-2 rounded-2xl text-[#006a46]">
@@ -781,9 +1065,14 @@ export const InvoiceBuilderView: React.FC<InvoiceBuilderViewProps> = ({
               </div>
 
               <div className="text-left sm:text-right">
-                <span className="text-3xl font-black tracking-wider text-[#006a46] uppercase block">
-                  {tenant.invoiceTitle || 'TAX INVOICE'}
-                </span>
+                {showDocTitle && (
+                  <span
+                    className="font-black tracking-wider text-[#006a46] uppercase block"
+                    style={{ fontSize: `${docTitleSize}px`, lineHeight: 1.1 }}
+                  >
+                    {docTitle || tenant.invoiceTitle || 'TAX INVOICE'}
+                  </span>
+                )}
                 <p className="text-sm font-mono font-bold text-[#0b1c30] mt-1">{invoiceNumber}</p>
                 <div className="text-xs text-[#545f73] mt-2 space-y-0.5">
                   <p><strong>Date:</strong> {date}</p>
@@ -855,13 +1144,13 @@ export const InvoiceBuilderView: React.FC<InvoiceBuilderViewProps> = ({
                         {it.quantity} {it.sizeUnit || ''}
                       </td>
                       <td className="py-3 px-2 text-right font-mono text-[#0b1c30]">
-                        {it.unitPrice.toLocaleString('en-MY', { minimumFractionDigits: 2 })}
+                        {fmt(it.unitPrice)}
                       </td>
                       <td className="py-3 px-2 text-center font-mono text-[#545f73]">
                         {it.taxRate > 0 ? `${(it.taxRate * 100).toFixed(0)}%` : '0%'}
                       </td>
                       <td className="py-3 px-2 text-right font-mono font-bold text-[#0b1c30]">
-                        {it.amount.toLocaleString('en-MY', { minimumFractionDigits: 2 })}
+                        {fmt(it.amount)}
                       </td>
                     </tr>
                   ))}
@@ -880,12 +1169,14 @@ export const InvoiceBuilderView: React.FC<InvoiceBuilderViewProps> = ({
                   <strong>Bank:</strong> {tenant.bankName}
                 </p>
                 <p className="font-mono text-xs text-[#0b1c30]">
-                  <strong>Account Name:</strong> {tenant.name}
+                  <strong>Account Name:</strong> {tenant.bankTitle || tenant.name}
                 </p>
                 <p className="font-mono text-xs text-[#0b1c30]">
                   <strong>Account No:</strong> {tenant.bankAccount}
                 </p>
-                <p className="text-[11px] text-[#545f73] italic pt-1 leading-relaxed">{notes}</p>
+                <p className="text-[11px] text-[#545f73] italic pt-1 leading-relaxed" style={{ textAlign: notesAlign }}>
+                  {notes}
+                </p>
               </div>
 
               {/* Total calculations block */}
@@ -893,23 +1184,43 @@ export const InvoiceBuilderView: React.FC<InvoiceBuilderViewProps> = ({
                 <div className="flex justify-between text-[#545f73]">
                   <span>Subtotal:</span>
                   <span className="font-mono text-[#0b1c30]">
-                    RM {subtotal.toLocaleString('en-MY', { minimumFractionDigits: 2 })}
+                    {fmt(subtotal)}
                   </span>
                 </div>
                 <div className="flex justify-between text-[#545f73]">
-                  <span>SST (8%):</span>
+                  <span>SST ({taxAmount > 0 ? 8 : 0}%):</span>
                   <span className="font-mono text-[#0b1c30]">
-                    RM {taxAmount.toLocaleString('en-MY', { minimumFractionDigits: 2 })}
+                    {fmt(taxAmount)}
                   </span>
                 </div>
                 <div className="flex justify-between items-baseline pt-2 border-t-2 border-[#006a46] text-[#006a46]">
                   <span className="text-sm font-bold uppercase tracking-wider">Total Due:</span>
                   <span className="font-mono text-xl font-black">
-                    RM {totalAmount.toLocaleString('en-MY', { minimumFractionDigits: 2 })}
+                    {fmt(totalAmount)}
                   </span>
                 </div>
               </div>
+
             </div>
+
+              {/* QR Code block (full sheet width so alignment reaches true edges) */}
+              {qrData && (
+                <div
+                  className="mt-4 w-full"
+                  style={{
+                    display: 'flex',
+                    justifyContent:
+                      qrAlign === 'left' ? 'flex-start' : qrAlign === 'center' ? 'center' : 'flex-end',
+                  }}
+                >
+                  <img
+                    src={`https://api.qrserver.com/v1/create-qr-code/?size=${qrSize}x${qrSize}&data=${encodeURIComponent(qrData)}`}
+                    alt="QR Code"
+                    style={{ width: qrSize, height: qrSize }}
+                    className="border border-[#bdcac0] rounded"
+                  />
+                </div>
+              )}
 
             {/* Footer Signoff */}
             <div className="mt-12 pt-6 border-t border-[#bdcac0]/40 text-center text-[10px] text-[#545f73] font-mono">

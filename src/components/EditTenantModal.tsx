@@ -544,6 +544,19 @@ export const EditTenantModal: React.FC<EditTenantModalProps> = ({
                     className="w-full bg-[#f8f9ff] border border-[#bdcac0] rounded-xl p-2.5 text-xs font-mono font-bold text-[#0b1c30] outline-none focus:border-[#006a46]"
                   />
                 </div>
+
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-[#3e4942] mb-1">
+                    Bank Account Title
+                  </label>
+                  <input
+                    type="text"
+                    value={formData.bankTitle}
+                    onChange={(e) => setFormData({ ...formData, bankTitle: e.target.value })}
+                    placeholder="Account holder name"
+                    className="w-full bg-[#f8f9ff] border border-[#bdcac0] rounded-xl p-2.5 text-xs font-semibold text-[#0b1c30] outline-none focus:border-[#006a46]"
+                  />
+                </div>
               </div>
             </div>
           )}

@@ -23,11 +23,15 @@ import { Tenant } from '../types';
 interface TenantSettingsViewProps {
   tenant: Tenant;
   onUpdateTenant: (updatedTenant: Tenant) => void;
+  soundsEnabled?: boolean;
+  onToggleSounds?: (val: boolean) => void;
 }
 
 export const TenantSettingsView: React.FC<TenantSettingsViewProps> = ({
   tenant,
   onUpdateTenant,
+  soundsEnabled,
+  onToggleSounds,
 }) => {
   const [formData, setFormData] = useState<Tenant>({
     ...tenant,
@@ -172,10 +176,27 @@ export const TenantSettingsView: React.FC<TenantSettingsViewProps> = ({
       {/* Header */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
-          <h2 className="text-3xl font-bold text-[#0b1c30] tracking-tight">Tenant Settings</h2>
+          <h2 className="text-3xl font-black text-[#0b1c30] tracking-tight">Tenant Settings</h2>
           <p className="text-sm text-[#545f73]">
             Configure customer brand logo, manual sizing, document titles, Malaysian corporate identity, and bank accounts.
           </p>
+        </div>
+
+        {/* Notification & System Sounds (Point 8) */}
+        <div className="flex items-center gap-3 bg-[#f8f9ff] border border-[#bdcac0]/60 rounded-xl px-4 py-3 shrink-0">
+          <div>
+            <div className="text-xs font-bold text-[#0b1c30]">Notification &amp; System Sounds</div>
+            <div className="text-[10px] text-[#545f73]">New notification, invoice generated &amp; deleted</div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={soundsEnabled}
+            onClick={() => onToggleSounds?.(!soundsEnabled)}
+            className={`relative w-12 h-6 rounded-full transition-colors ${soundsEnabled ? 'bg-[#006a46]' : 'bg-[#bdcac0]'}`}
+          >
+            <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${soundsEnabled ? 'translate-x-6' : ''}`} />
+          </button>
         </div>
 
         {/* Top Save button with animated tick reaction */}
@@ -626,6 +647,19 @@ export const TenantSettingsView: React.FC<TenantSettingsViewProps> = ({
                 onChange={(e) => setFormData({ ...formData, bankAccount: e.target.value })}
                 placeholder="5123-4567-8900"
                 className="w-full bg-[#f8f9ff] border border-[#bdcac0] rounded-xl p-2.5 font-mono font-semibold text-[#0b1c30] outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-semibold text-[#545f73] uppercase mb-1">
+                Bank Account Title
+              </label>
+              <input
+                type="text"
+                value={formData.bankTitle}
+                onChange={(e) => setFormData({ ...formData, bankTitle: e.target.value })}
+                placeholder="Account holder name"
+                className="w-full bg-[#f8f9ff] border border-[#bdcac0] rounded-xl p-2.5 font-semibold text-[#0b1c30] outline-none"
               />
             </div>
           </div>

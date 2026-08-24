@@ -113,6 +113,7 @@ export const AddTenantModal: React.FC<AddTenantModalProps> = ({
         invoicesCount: 0,
         bankName: 'Maybank',
         bankAccount: '5123-9999-0000',
+        bankTitle: '',
         logoHeight: 52,
         invoiceTitle: 'Tax Invoice',
       };

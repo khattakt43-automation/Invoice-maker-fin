@@ -1,0 +1,3 @@
+run: node dist/server.cjs
+assets:
+  - dist

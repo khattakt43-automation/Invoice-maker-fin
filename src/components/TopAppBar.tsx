@@ -16,6 +16,7 @@ import {
   Plus
 } from 'lucide-react';
 import { Tenant, UserRole } from '../types';
+import { playSound } from '../utils/sound';
 
 interface TopAppBarProps {
   currentRole: UserRole;
@@ -26,6 +27,9 @@ interface TopAppBarProps {
   onCreateInvoice?: () => void;
   onLogout?: () => void;
   onNavigateToTab?: (tab: string) => void;
+  onToggleSidebar?: () => void;
+  onNotificationNavigate?: (link?: { tab: string; customerId?: string; invoiceId?: string }) => void;
+  soundsEnabled?: boolean;
 }
 
 export const TopAppBar: React.FC<TopAppBarProps> = ({
@@ -37,6 +41,9 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
   onCreateInvoice,
   onLogout,
   onNavigateToTab,
+  onToggleSidebar,
+  onNotificationNavigate,
+  soundsEnabled,
 }) => {
   const isSuperAdmin = currentRole === 'super_admin';
   const [showNotifications, setShowNotifications] = useState(false);
@@ -81,32 +88,37 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
     };
   }, []);
 
-  const notifications = [
-    {
-      id: 1,
-      title: 'Payment Received (RM 12,500.00)',
-      desc: 'Acme Corp Malaysia settled INV-2023-089 via Maybank FPX.',
-      time: '10m ago',
-      icon: CheckCircle,
-      iconColor: 'text-emerald-600 bg-emerald-50',
-    },
-    {
-      id: 2,
-      title: 'Overdue Reminder: INV-2023-085',
-      desc: 'Nexus Tech Partners invoice is 10 days past due (RM 2,000.00).',
-      time: '2h ago',
-      icon: AlertTriangle,
-      iconColor: 'text-amber-600 bg-amber-50',
-    },
-    {
-      id: 3,
-      title: 'LHDN SST e-Invoice Sync',
-      desc: 'Monthly tax reporting schedule validated for Q4 2023.',
-      time: '1d ago',
-      icon: Clock,
-      iconColor: 'text-blue-600 bg-blue-50',
-    },
-  ];
+  // Context-aware notifications:
+  //  - Tenant role: only this tenant's notifications (isolated by tenantId).
+  //  - Super Admin: only admin/platform-level notifications (tenantId === 'platform'),
+  //    never another tenant's operational alerts.
+  const [notifications, setNotifications] = useState<any[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const q = isSuperAdmin ? '?scope=platform' : `?tenantId=${encodeURIComponent(activeTenant.id)}`;
+        const res = await fetch(`/api/notifications${q}`);
+        if (!res.ok) throw new Error('notif fetch failed');
+        const data = await res.json();
+        if (!cancelled) setNotifications(Array.isArray(data.data) ? data.data : []);
+      } catch {
+        if (!cancelled) setNotifications([]);
+      }
+    }
+    load();
+    const t = setInterval(load, 15000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [isSuperAdmin, activeTenant.id]);
+
+  const iconMap: Record<string, any> = {
+    check: CheckCircle,
+    alert: AlertTriangle,
+    clock: Clock,
+    invoice: CheckCircle,
+    user: CheckCircle,
+    info: Clock,
+  };
 
   return (
     <header
@@ -115,6 +127,16 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
     >
       {/* Left section: navigation links or search */}
       <div className="flex items-center gap-6">
+        {/* Mobile burger */}
+        <button
+          onClick={onToggleSidebar}
+          className="lg:hidden p-2 -ml-2 rounded-lg text-[#545f73] hover:text-[#006a46] hover:bg-[#eff4ff] transition-colors cursor-pointer"
+          aria-label="Open navigation menu"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
+          </svg>
+        </button>
         <nav className="hidden md:flex items-center gap-6">
           <button
             onClick={() => {}}
@@ -122,16 +144,6 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
           >
             Platform
           </button>
-          <a
-            href="#resources"
-            onClick={(e) => {
-              e.preventDefault();
-              onOpenSupport();
-            }}
-            className="text-xs font-semibold tracking-wider text-[#545f73] hover:text-[#006a46] uppercase transition-colors"
-          >
-            Resources
-          </a>
         </nav>
 
         {/* Impersonate Search or Filter for Admin */}
@@ -202,7 +214,7 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
           onClick={onOpenSupport}
           className="hidden sm:block text-xs font-semibold text-[#006a46] border border-[#00855a]/30 px-3 py-1.5 rounded-lg hover:bg-[#00855a]/5 transition-colors cursor-pointer"
         >
-          Support
+          Help & Support
         </button>
 
         {/* Notifications */}
@@ -233,11 +245,15 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
               </div>
               <div className="space-y-2">
                 {notifications.map((n) => {
-                  const Icon = n.icon;
+                  const Icon = iconMap[n.icon] || CheckCircle;
                   return (
                     <div
                       key={n.id}
-                      onClick={() => setShowNotifications(false)}
+                      onClick={() => {
+                        setShowNotifications(false);
+                        playSound('notification', soundsEnabled !== false);
+                        onNotificationNavigate?.(n.link);
+                      }}
                       className="p-2 rounded-xl hover:bg-[#eff4ff] transition-colors flex items-start gap-2.5 cursor-pointer"
                     >
                       <div className={`p-1.5 rounded-lg shrink-0 ${n.iconColor}`}>

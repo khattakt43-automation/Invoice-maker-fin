@@ -10,20 +10,29 @@ import {
   initialRetainerPlans
 } from "./src/data/mockData";
 import { Tenant, Customer, Invoice, Product } from "./src/types";
+import { db, save } from "./src/server/db";
+
+// Seed WhatsApp entitlement defaults (kept for type references in this file).
+import { emptyUsage } from "./src/services/whatsappEntitlement";
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
   app.use(express.json());
 
-  // In-memory data store with seeded initial data
-  let tenants: Tenant[] = [...initialTenants];
-  let customers: Customer[] = [...initialCustomers];
-  let invoices: Invoice[] = [...initialInvoices];
-  let products: Product[] = [...initialProducts];
-  let platformKPIs = { ...initialPlatformKPIs };
-  const retainerPlans = [...initialRetainerPlans];
+  // Persistent data store (write-through JSON file). This is the single source
+  // of truth: every mutation is persisted immediately and reads always reflect
+  // what is on disk, so data survives restarts and navigation.
+  const store = db();
+
+  // Convenience mutable references bound to the persistent store.
+  const tenants = store.tenants;
+  const customers = store.customers;
+  const invoices = store.invoices;
+  const products = store.products;
+  const platformKPIs = store.platformKPIs;
+  const retainerPlans = store.retainerPlans;
 
   // API Routes
 
@@ -67,6 +76,17 @@ async function startServer() {
     tenants.unshift(newTenant);
     platformKPIs.totalTenants += 1;
     platformKPIs.activeTenants += 1;
+    // Admin notification: new tenant created (context-aware, platform-scoped)
+    notifications.unshift({
+      id: `ntf-admin-${Date.now()}`,
+      tenantId: "platform",
+      title: "New tenant created",
+      desc: `${newTenant.name} (${newTenant.code}) was added to the platform.`,
+      time: "just now",
+      icon: "check",
+      link: { tab: "admin-overview" },
+    });
+    save();
     res.status(201).json({ data: newTenant, message: "Tenant created successfully" });
   });
 
@@ -77,7 +97,22 @@ async function startServer() {
       return res.status(404).json({ error: "Tenant not found" });
     }
 
+    const prev = tenants[index];
     tenants[index] = { ...tenants[index], ...req.body };
+    // Notify admin on suspension / reactivation changes
+    if (req.body.status && req.body.status !== prev.status) {
+      const suspended = /suspend/i.test(req.body.status);
+      notifications.unshift({
+        id: `ntf-admin-${Date.now()}`,
+        tenantId: "platform",
+        title: suspended ? "Tenant suspended" : `Tenant status: ${req.body.status}`,
+        desc: `${tenants[index].name} is now ${req.body.status}.`,
+        time: "just now",
+        icon: suspended ? "alert" : "check",
+        link: { tab: "admin-overview" },
+      });
+    }
+    save();
     res.json({ data: tenants[index], message: "Tenant updated successfully" });
   });
 
@@ -141,6 +176,7 @@ async function startServer() {
     };
 
     customers.unshift(newCustomer);
+    save();
     res.status(201).json({ data: newCustomer, message: "Customer created successfully" });
   });
 
@@ -152,7 +188,18 @@ async function startServer() {
     }
 
     customers[index] = { ...customers[index], ...req.body };
+    save();
     res.json({ data: customers[index], message: "Customer updated successfully" });
+  });
+
+  app.delete("/api/customers/:id", (req, res) => {
+    const index = customers.findIndex((c) => c.id === req.params.id);
+    if (index === -1) {
+      return res.status(404).json({ error: "Customer not found" });
+    }
+    const [removed] = customers.splice(index, 1);
+    save();
+    res.json({ data: removed, message: "Customer deleted successfully" });
   });
 
   // --- INVOICES API ---
@@ -207,6 +254,12 @@ async function startServer() {
       notes: req.body.notes || "Thank you for your business.",
       paperSize: req.body.paperSize || "A4 (Standard)",
       paymentTerms: req.body.paymentTerms || "Payment due within 30 days.",
+      docTitle: req.body.docTitle,
+      showDocTitle: req.body.showDocTitle !== undefined ? req.body.showDocTitle : true,
+      notesAlign: req.body.notesAlign || "left",
+      qrData: req.body.qrData || "",
+      qrSize: req.body.qrSize || 110,
+      qrAlign: req.body.qrAlign || "right",
       createdAt: new Date().toISOString(),
     };
 
@@ -231,7 +284,73 @@ async function startServer() {
       });
     }
 
+    save();
     res.status(201).json({ data: newInvoice, message: "Invoice created successfully" });
+  });
+
+  app.put("/api/invoices/:id", (req, res) => {
+    const index = invoices.findIndex((i) => i.id === req.params.id);
+    if (index === -1) {
+      return res.status(404).json({ error: "Invoice not found" });
+    }
+    const existing = invoices[index];
+    const subtotal = (req.body.items || []).reduce(
+      (acc, item) => acc + (Number(item.unitPrice) || 0) * (Number(item.quantity) || 1),
+      0
+    );
+    const taxRate = req.body.taxRate !== undefined ? Number(req.body.taxRate) : existing.taxRate;
+    const taxAmount = subtotal * taxRate;
+    const totalAmount = subtotal + taxAmount;
+
+    const updated: Invoice = {
+      ...existing,
+      invoiceNumber: req.body.invoiceNumber || existing.invoiceNumber,
+      tenantId: req.body.tenantId || existing.tenantId,
+      customerId: req.body.customerId || existing.customerId,
+      customerName: req.body.customerName || existing.customerName,
+      customerEmail: req.body.customerEmail || existing.customerEmail,
+      customerPhone: req.body.customerPhone || existing.customerPhone,
+      customerAddress: req.body.customerAddress || existing.customerAddress,
+      customerTin: req.body.customerTin || existing.customerTin,
+      date: req.body.date || existing.date,
+      dueDate: req.body.dueDate || existing.dueDate,
+      items: req.body.items || existing.items,
+      subtotal,
+      taxRate,
+      taxAmount,
+      totalAmount,
+      currency: req.body.currency || existing.currency,
+      status: req.body.status || existing.status,
+      notes: req.body.notes || existing.notes,
+      paperSize: req.body.paperSize || existing.paperSize,
+      paymentTerms: req.body.paymentTerms || existing.paymentTerms,
+      docTitle: req.body.docTitle !== undefined ? req.body.docTitle : existing.docTitle,
+      showDocTitle: req.body.showDocTitle !== undefined ? req.body.showDocTitle : existing.showDocTitle,
+      notesAlign: req.body.notesAlign || existing.notesAlign,
+      qrData: req.body.qrData !== undefined ? req.body.qrData : existing.qrData,
+      qrSize: req.body.qrSize || existing.qrSize,
+      qrAlign: req.body.qrAlign || existing.qrAlign,
+      updatedAt: new Date().toISOString(),
+    };
+
+    invoices[index] = updated;
+
+    // Keep the customer recentInvoices entry in sync
+    const cust = customers.find((c) => c.id === updated.customerId || c.name === updated.customerName);
+    if (cust && cust.recentInvoices) {
+      cust.recentInvoices = cust.recentInvoices.filter((r) => r.id !== updated.id);
+      cust.recentInvoices.unshift({
+        id: updated.id,
+        invoiceNumber: updated.invoiceNumber,
+        date: updated.date,
+        dueDate: updated.dueDate,
+        amount: totalAmount,
+        status: updated.status,
+      });
+    }
+
+    save();
+    res.json({ data: updated, message: "Invoice updated successfully" });
   });
 
   app.patch("/api/invoices/:id/status", (req, res) => {
@@ -258,6 +377,21 @@ async function startServer() {
     }
 
     res.json({ data: inv, message: `Invoice status updated to ${status}` });
+  });
+
+  app.delete("/api/invoices/:id", (req, res) => {
+    const index = invoices.findIndex((i) => i.id === req.params.id);
+    if (index === -1) {
+      return res.status(404).json({ error: "Invoice not found" });
+    }
+    const [removed] = invoices.splice(index, 1);
+    // Revert customer balance if it was paid
+    const cust = customers.find((c) => c.id === removed.customerId || c.name === removed.customerName);
+    if (cust && removed.status === "Paid") {
+      cust.outstandingBalance = Math.max(0, cust.outstandingBalance + removed.totalAmount);
+    }
+    save();
+    res.json({ data: removed, message: "Invoice deleted successfully" });
   });
 
   // --- PRODUCTS API ---
@@ -315,12 +449,9 @@ async function startServer() {
     "Letter": { w: "8.5in", h: "11in", page: "Letter" },
     "Legal": { w: "8.5in", h: "14in", page: "Legal" },
   };
-  app.get("/i/:number", (req, res) => {
-    const num = String(req.params.number).toLowerCase().replace(/[^a-z0-9]/g, "");
-    const inv = invoices.find((i) => i.invoiceNumber.toLowerCase().replace(/[^a-z0-9]/g, "") === num);
-    if (!inv) return res.status(404).send("<h1>Invoice not found</h1>");
-    const tenant = tenants.find((t) => t.id === inv.tenantId) || initialTenants[0];
-    const cust = customers.find((c) => c.id === inv.customerId);
+  // Shared invoice HTML renderer — single source of truth for the invoice design
+  // used by both the public view (/i/:number) and the example/sample view.
+  const renderInvoiceHtml = (inv: any, tenant: any, cust: any | undefined, opts?: { sample?: boolean }) => {
     const fmt = (n: number) => (n ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2 });
     const GREEN = "#006a46";
     const DARK = "#0b1c30";
@@ -339,6 +470,9 @@ async function startServer() {
       </tr>`;
     }).join("");
     const billLines = [inv.customerAddress, inv.customerPhone && `Tel/WhatsApp: ${inv.customerPhone}`, inv.customerEmail && `Email: ${inv.customerEmail}`, inv.customerTin && `TIN: ${inv.customerTin}`].filter(Boolean).join("<br>");
+    const sampleBanner = opts?.sample
+      ? `<div style="background:#fff7ed;color:#9a3412;border:1px solid #fdba74;border-radius:10px;padding:10px 14px;margin-bottom:18px;font-size:12px;font-weight:600;text-align:center">SAMPLE / DEMO INVOICE — not a real transaction. For demonstration only.</div>`
+      : "";
     const html = `<!doctype html><html><head><meta charset="utf-8"><title>${inv.invoiceNumber} - ${tenant.name}</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
@@ -378,6 +512,7 @@ async function startServer() {
 </style></head>
 <body>
   <div class="sheet">
+    ${sampleBanner}
     <div class="wm">${inv.status}</div>
     <div class="head">
       <div>
@@ -410,24 +545,360 @@ async function startServer() {
       <div class="remit">
         <span class="lbl">Remittance Instructions</span>
         <div class="mono"><strong>Bank:</strong> ${tenant.bankName}</div>
-        <div class="mono"><strong>Account Name:</strong> ${tenant.name}</div>
+        <div class="mono"><strong>Account Name:</strong> ${tenant.bankTitle || tenant.name}</div>
         <div class="mono"><strong>Account No:</strong> ${tenant.bankAccount}</div>
         ${inv.notes ? `<div style="font-size:11px;color:${MUTE};font-style:italic;margin-top:6px">${inv.notes}</div>` : ""}
       </div>
       <div class="totals">
-        <div class="row"><span>Subtotal:</span><span class="mono">RM ${fmt(inv.subtotal)}</span></div>
-        <div class="row"><span>SST (${((inv.taxRate || 0) * 100).toFixed(0)}%):</span><span class="mono">RM ${fmt(inv.taxAmount)}</span></div>
-        <div class="totaldue"><span class="lbl" style="color:${GREEN}">Total Due:</span><span class="big">RM ${fmt(inv.totalAmount)}</span></div>
+        <div class="row"><span>Subtotal:</span><span class="mono">${inv.currency} ${fmt(inv.subtotal)}</span></div>
+        <div class="row"><span>SST (${((inv.taxRate || 0) * 100).toFixed(0)}%):</span><span class="mono">${inv.currency} ${fmt(inv.taxAmount)}</span></div>
+        <div class="totaldue"><span class="lbl" style="color:${GREEN}">Total Due:</span><span class="big">${inv.currency} ${fmt(inv.totalAmount)}</span></div>
       </div>
     </div>
     <div class="foot">This is a computer-generated tax invoice issued via BillLah! Cloud Invoicing. No physical signature required.</div>
   </div>
   <div class="toolbar"><button class="btn" onclick="window.print()">Print / Save as PDF</button></div>
 </body></html>`;
+    return html;
+  };
+
+  app.get("/i/example", (req, res) => {
+    // Clearly-labeled sample/demo invoice rendered with the SAME design as real
+    // invoices (spec point 6). It is never mixed with real customer invoices.
+    const tenant = tenants[0];
+    const sampleInv = {
+      invoiceNumber: "INV-SAMPLE-0001",
+      customerName: "Sample Customer Sdn Bhd",
+      customerAddress: "12 Jalan Demo, Taman Contoh,\n50450 Kuala Lumpur, Malaysia",
+      customerPhone: "+60 12-345 6789",
+      customerEmail: "sample@customer.my",
+      customerTin: "C1234567890",
+      date: new Date().toISOString().split("T")[0],
+      dueDate: new Date(Date.now() + 30 * 86400000).toISOString().split("T")[0],
+      status: "Unpaid",
+      currency: "RM",
+      paperSize: "A4 (Standard)",
+      items: [
+        { description: "Premium Satin Fabric — Emerald", quantity: 50, sizeUnit: "m", unitPrice: 18.5, taxRate: 0.08, amount: 925 },
+        { description: "Custom Logo Printing", quantity: 1, sizeUnit: "job", unitPrice: 120, taxRate: 0.08, amount: 120 },
+        { description: "Express Delivery", quantity: 1, sizeUnit: "trip", unitPrice: 35, taxRate: 0.08, amount: 35 },
+      ],
+      subtotal: 1080,
+      taxRate: 0.08,
+      taxAmount: 86.4,
+      totalAmount: 1166.4,
+      notes: "Thank you for your business. Payment due within 30 days.",
+    };
+    const html = renderInvoiceHtml(sampleInv, tenant, undefined, { sample: true });
     res.setHeader("Content-Type", "text/html");
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
     res.setHeader("Pragma", "no-cache");
     res.send(html);
+  });
+
+  app.get("/i/:number", (req, res) => {
+    const num = String(req.params.number).toLowerCase().replace(/[^a-z0-9]/g, "");
+    const inv = invoices.find((i) => i.invoiceNumber.toLowerCase().replace(/[^a-z0-9]/g, "") === num);
+    if (!inv) return res.status(404).send("<h1>Invoice not found</h1>");
+    const tenant = tenants.find((t) => t.id === inv.tenantId) || initialTenants[0];
+    const cust = customers.find((c) => c.id === inv.customerId);
+    const html = renderInvoiceHtml(inv, tenant, cust);
+    res.setHeader("Content-Type", "text/html");
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+    res.setHeader("Pragma", "no-cache");
+    res.send(html);
+  });
+
+  // ---------------------------------------------------------------------------
+  // WHATSAPP MONETIZABLE MULTI-TENANT SUBSYSTEM (specs 2 & 3)
+  // Data is persisted to the JSON store; a real DB / payment provider can be
+  // swapped in later. All protected operations go through the entitlement
+  // service (no hard-coded plan branching in component code).
+  // ---------------------------------------------------------------------------
+  const waPlans = store.waPlans;
+  const waSubscriptions = store.waSubscriptions;
+  const waAccounts = store.waAccounts;
+  const waUsage = store.waUsage;
+  const waOverrides = store.waOverrides;
+  const auditLogs = store.auditLogs;
+
+  const seedWhatsAppForTenant = (tenantId: string) => {
+    if (!waUsage.find((u) => u.tenantId === tenantId)) {
+      waUsage.push(emptyUsage(tenantId));
+    }
+  };
+  tenants.forEach((t) => seedWhatsAppForTenant(t.id));
+
+  const addAudit = (entry: any) => {
+    auditLogs.unshift({ id: `audit-${Date.now()}`, timestamp: new Date().toISOString(), ...entry });
+    if (auditLogs.length > 500) auditLogs.length = 500;
+  };
+
+  // Plans & Pricing
+  app.get("/api/whatsapp/plans", (req, res) => res.json({ data: waPlans }));
+  app.post("/api/whatsapp/plans", (req, res) => {
+    const plan = { ...req.body, id: req.body.id || `wa-${Date.now()}` };
+    waPlans.push(plan);
+    addAudit({ tenantId: "platform", actor: "Super Admin", action: "plan.created", detail: plan.name });
+    res.status(201).json({ data: plan });
+  });
+  app.patch("/api/whatsapp/plans/:id", (req, res) => {
+    const i = waPlans.findIndex((p) => p.id === req.params.id);
+    if (i === -1) return res.status(404).json({ error: "Plan not found" });
+    waPlans[i] = { ...waPlans[i], ...req.body };
+    addAudit({ tenantId: "platform", actor: "Super Admin", action: "plan.updated", detail: waPlans[i].name });
+    res.json({ data: waPlans[i] });
+  });
+  app.delete("/api/whatsapp/plans/:id", (req, res) => {
+    const i = waPlans.findIndex((p) => p.id === req.params.id);
+    if (i >= 0) waPlans.splice(i, 1);
+    save();
+    res.json({ message: "Plan deleted" });
+  });
+
+  // Subscriptions (per tenant)
+  app.get("/api/whatsapp/subscriptions", (req, res) => {
+    const { tenantId } = req.query;
+    const list = tenantId ? waSubscriptions.filter((s) => s.tenantId === tenantId) : waSubscriptions;
+    res.json({ data: list });
+  });
+  app.post("/api/whatsapp/subscriptions", (req, res) => {
+    const { tenantId, planId } = req.body;
+    const plan = waPlans.find((p) => p.id === planId);
+    if (!plan) return res.status(404).json({ error: "Plan not found" });
+    const start = new Date();
+    const end = new Date(start); end.setMonth(end.getMonth() + 1);
+    const sub = {
+      tenantId,
+      planId,
+      status: "active",
+      price: plan.monthlyPrice,
+      billingCycle: "monthly",
+      subscriptionStart: start.toISOString(),
+      subscriptionEnd: end.toISOString(),
+      messageLimit: plan.messageLimit,
+      messagesUsed: 0,
+      aiLimit: plan.aiLimit,
+      aiUsed: 0,
+      voiceMinutesLimit: plan.voiceMinutesLimit,
+      voiceMinutesUsed: 0,
+      invoiceLimit: plan.invoiceLimit,
+      invoicesUsed: 0,
+      automationLimit: plan.automationLimit,
+      automationsUsed: 0,
+    };
+    const existing = waSubscriptions.findIndex((s) => s.tenantId === tenantId);
+    if (existing >= 0) waSubscriptions[existing] = sub; else waSubscriptions.push(sub);
+    seedWhatsAppForTenant(tenantId);
+    addAudit({ tenantId, actor: "Super Admin", action: "subscription.activated", detail: `Plan ${plan.name}` });
+    save();
+    res.status(201).json({ data: sub });
+  });
+  app.patch("/api/whatsapp/subscriptions/:tenantId", (req, res) => {
+    const i = waSubscriptions.findIndex((s) => s.tenantId === req.params.tenantId);
+    if (i === -1) return res.status(404).json({ error: "Subscription not found" });
+    waSubscriptions[i] = { ...waSubscriptions[i], ...req.body };
+    addAudit({ tenantId: req.params.tenantId, actor: "Super Admin", action: "subscription.updated", detail: JSON.stringify(req.body) });
+    save();
+    res.json({ data: waSubscriptions[i] });
+  });
+
+  // Accounts / connections
+  app.get("/api/whatsapp/accounts", (req, res) => {
+    const { tenantId } = req.query;
+    const list = tenantId ? waAccounts.filter((a) => a.tenantId === tenantId) : waAccounts;
+    res.json({ data: list });
+  });
+  app.put("/api/whatsapp/accounts/:tenantId", (req, res) => {
+    const tenantId = req.params.tenantId;
+    const i = waAccounts.findIndex((a) => a.tenantId === tenantId);
+    const account = {
+      tenantId,
+      phoneNumber: req.body.phoneNumber || "",
+      connectionStatus: req.body.connectionStatus || "disconnected",
+      aiEnabled: Boolean(req.body.aiEnabled),
+      invoiceGenerationEnabled: Boolean(req.body.invoiceGenerationEnabled),
+      automationEnabled: Boolean(req.body.automationEnabled),
+      voiceTranscriptionEnabled: Boolean(req.body.voiceTranscriptionEnabled),
+      lastActivity: new Date().toISOString(),
+    };
+    if (i >= 0) waAccounts[i] = account; else waAccounts.push(account);
+    addAudit({ tenantId, actor: "Super Admin", action: "account.updated", detail: account.connectionStatus });
+    save();
+    res.json({ data: account });
+  });
+
+  // Usage
+  app.get("/api/whatsapp/usage", (req, res) => {
+    const { tenantId } = req.query;
+    const list = tenantId ? waUsage.filter((u) => u.tenantId === tenantId) : waUsage;
+    res.json({ data: list });
+  });
+  app.post("/api/whatsapp/usage/:tenantId/increment", (req, res) => {
+    const u = waUsage.find((x) => x.tenantId === req.params.tenantId);
+    if (u) Object.assign(u, req.body);
+    save();
+    res.json({ data: u });
+  });
+
+  // Feature overrides
+  app.get("/api/whatsapp/overrides", (req, res) => {
+    const { tenantId } = req.query;
+    const list = tenantId ? waOverrides.filter((o) => o.tenantId === tenantId) : waOverrides;
+    res.json({ data: list });
+  });
+  app.post("/api/whatsapp/overrides", (req, res) => {
+    const ov = { id: `ov-${Date.now()}`, date: new Date().toISOString(), ...req.body };
+    waOverrides.push(ov);
+    addAudit({ tenantId: ov.tenantId, actor: ov.adminActor || "Super Admin", action: ov.granted ? "feature.granted" : "feature.revoked", detail: ov.feature });
+    save();
+    res.status(201).json({ data: ov });
+  });
+
+  // Audit logs
+  app.get("/api/whatsapp/audit", (req, res) => {
+    const { tenantId } = req.query;
+    const list = tenantId ? auditLogs.filter((a) => a.tenantId === tenantId || a.tenantId === "platform") : auditLogs;
+    res.json({ data: list });
+  });
+
+  // Centralized entitlement check endpoint (backend authorization layer)
+  app.get("/api/whatsapp/entitlement/:tenantId", (req, res) => {
+    const { feature } = req.query;
+    const sub = waSubscriptions.find((s) => s.tenantId === req.params.tenantId);
+    const plan = sub && waPlans.find((p) => p.id === sub.planId);
+    const account = waAccounts.find((a) => a.tenantId === req.params.tenantId);
+    const usage = waUsage.find((u) => u.tenantId === req.params.tenantId);
+    const overrides = waOverrides.filter((o) => o.tenantId === req.params.tenantId);
+    const { hasFeature, checkUsage, isServiceBlocked } = require("./src/services/whatsappEntitlement");
+    const ctx = { subscription: sub, plan, account, usage, overrides };
+    const allowed = sub && !isServiceBlocked(sub) && hasFeature(ctx, feature).allowed && checkUsage(ctx, "message").allowed;
+    res.json({ allowed: Boolean(allowed), blocked: isServiceBlocked(sub) });
+  });
+
+  // Webhook simulation endpoint (voice -> transcription -> invoice pipeline)
+  // NOTE: real WhatsApp/AI connectivity requires credentials; this endpoint
+  // demonstrates the protected workflow + entitlement gating + usage tracking.
+  app.post("/api/whatsapp/webhook/:tenantId", async (req, res) => {
+    const tenantId = req.params.tenantId;
+    const sub = waSubscriptions.find((s) => s.tenantId === tenantId);
+    const plan = sub && waPlans.find((p) => p.id === sub.planId);
+    const account = waAccounts.find((a) => a.tenantId === tenantId);
+    const usage = waUsage.find((u) => u.tenantId === tenantId);
+    const overrides = waOverrides.filter((o) => o.tenantId === tenantId);
+    const { authorize } = require("./src/services/whatsappEntitlement");
+    const ctx = { subscription: sub, plan, account, usage, overrides };
+
+    const isVoice = Boolean(req.body?.voice);
+    const feature: any = isVoice ? "voice_transcription" : "ai_invoice_generation";
+    const gate = authorize(ctx, feature, isVoice ? "voice" : "ai");
+    if (!gate.allowed) {
+      addAudit({ tenantId, actor: "System", action: "webhook.blocked", detail: gate.reason || "not entitled" });
+      return res.status(403).json({ error: gate.reason || "Not entitled" });
+    }
+    // Track usage
+    if (usage) {
+      if (isVoice) { usage.voiceMessages += 1; usage.voiceMinutes += Number(req.body?.durationSeconds || 0) / 60; }
+      else { usage.aiConversations += 1; usage.outgoingMessages += 1; usage.incomingMessages += 1; }
+    }
+    addAudit({ tenantId, actor: "WhatsApp AI", action: "webhook.processed", detail: isVoice ? "voice transcription" : "text invoice request" });
+    save();
+    res.json({ ok: true, status: "processed", entitlement: gate });
+  });
+
+  // ---------------------------------------------------------------------------
+  // NOTIFICATIONS + ACTIVITY LOGS (invoice points 6-9) — persisted to store
+  // ---------------------------------------------------------------------------
+  const notifications = store.notifications;
+  const activityLogs = store.activityLogs;
+  const upgradeRequests = store.upgradeRequests;
+  const paymentSettings = store.paymentSettings;
+
+  app.get("/api/notifications", (req, res) => {
+    const { tenantId, scope } = req.query as { tenantId?: string; scope?: string };
+    if (scope === "platform") {
+      // Admin center: only platform/admin-level events, never tenant operations.
+      const list = notifications.filter((n) => n.tenantId === "platform");
+      return res.json({ data: list });
+    }
+    const list = tenantId ? notifications.filter((n) => n.tenantId === tenantId) : notifications;
+    res.json({ data: list });
+  });
+
+  app.post("/api/notifications", (req, res) => {
+    const entry = { id: `ntf-${Date.now()}`, time: "just now", ...req.body };
+    notifications.unshift(entry);
+    if (notifications.length > 500) notifications.length = 500;
+    save();
+    res.status(201).json({ data: entry });
+  });
+
+  app.get("/api/activity-logs", (req, res) => {
+    const { tenantId } = req.query;
+    const list = tenantId ? activityLogs.filter((a) => a.tenantId === tenantId) : activityLogs;
+    res.json({ data: list });
+  });
+
+  app.post("/api/activity-logs", (req, res) => {
+    const entry = { id: `act-${Date.now()}`, timestamp: new Date().toISOString(), ...req.body };
+    activityLogs.unshift(entry);
+    if (activityLogs.length > 500) activityLogs.length = 500;
+    save();
+    res.status(201).json({ data: entry });
+  });
+
+  // Plan upgrade requests (tenant submits payment; admin verifies)
+  app.get("/api/upgrade-requests", (req, res) => {
+    const { tenantId } = req.query;
+    const list = tenantId ? upgradeRequests.filter((r) => r.tenantId === tenantId) : upgradeRequests;
+    res.json({ data: list });
+  });
+  app.post("/api/upgrade-requests", (req, res) => {
+    const ref = `UPG-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${String(upgradeRequests.length + 1).padStart(5, "0")}`;
+    const reqEntry = {
+      id: `upg-${Date.now()}`,
+      reference: ref,
+      status: "pending",
+      createdAt: new Date().toISOString(),
+      ...req.body,
+    };
+    upgradeRequests.unshift(reqEntry);
+    notifications.unshift({
+      id: `ntf-admin-${Date.now()}`,
+      tenantId: "platform",
+      title: "New plan upgrade request",
+      desc: `${req.body.tenantName || req.body.tenantId} requested ${req.body.requestedPlanName || "a plan upgrade"} (${ref}).`,
+      time: "just now",
+      icon: "alert",
+      link: { tab: "admin-whatsapp" },
+    });
+    save();
+    res.status(201).json({ data: reqEntry });
+  });
+  app.patch("/api/upgrade-requests/:id", (req, res) => {
+    const i = upgradeRequests.findIndex((r) => r.id === req.params.id);
+    if (i === -1) return res.status(404).json({ error: "Request not found" });
+    upgradeRequests[i] = { ...upgradeRequests[i], ...req.body };
+    addAudit({ tenantId: upgradeRequests[i].tenantId, actor: "Super Admin", action: "upgrade.reviewed", detail: req.body.status || "" });
+    save();
+    res.json({ data: upgradeRequests[i] });
+  });
+
+  // Admin payment / bank details
+  app.get("/api/payment-settings", (req, res) => {
+    res.json({ data: paymentSettings });
+  });
+  app.patch("/api/payment-settings", (req, res) => {
+    Object.assign(paymentSettings, req.body);
+    save();
+    res.json({ data: paymentSettings });
+  });
+
+  // Sound event hook (the frontend plays sounds; this records the event server-side)
+  app.post("/api/sound-events", (req, res) => {
+    addAudit({ tenantId: req.body?.tenantId || "platform", actor: "System", action: "sound.played", detail: req.body?.event || "unknown" });
+    save();
+    res.json({ ok: true });
   });
 
   // Vite middleware for development

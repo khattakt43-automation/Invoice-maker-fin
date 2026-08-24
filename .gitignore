@@ -6,3 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Runtime persistence store (seeded at startup; must not be committed)
+data/
