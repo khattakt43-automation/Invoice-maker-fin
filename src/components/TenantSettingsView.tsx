@@ -20,6 +20,7 @@ import {
   Maximize2
 } from 'lucide-react';
 import { Tenant } from '../types';
+import { apiFetch } from "./lib/api";
 
 interface TenantSettingsViewProps {
   tenant: Tenant;

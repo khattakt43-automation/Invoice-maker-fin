@@ -42,32 +42,15 @@ import { WhatsAppAdminView } from './components/WhatsAppAdminView';
 import { WhatsAppTenantView } from './components/WhatsAppTenantView';
 import { TenantPlanView } from './components/TenantPlanView';
 import { playSound } from './utils/sound';
+import { api, apiGet, apiPost } from './lib/api';
+import { apiFetch } from "./lib/api";
 
 export function App() {
-  // App state
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
-    // Default landing = sign-in screen. A returning, still-valid session
-    // (set by handleSignIn / refresh) restores automatically; everyone else
-    // lands on the Tenant Sign-In screen.
-    try {
-      const s = JSON.parse(sessionStorage.getItem('billah_session_v1') || 'null');
-      return !!(s && (s.role === 'super_admin' || s.role === 'business_admin'));
-    } catch { return false; }
-  });
-  const [currentRole, setCurrentRole] = useState<UserRole>(() => {
-    try {
-      const s = JSON.parse(sessionStorage.getItem('billah_session_v1') || 'null');
-      if (s?.role === 'super_admin' || s?.role === 'business_admin') return s.role;
-    } catch { /* ignore */ }
-    return 'business_admin';
-  });
-  const [activeTab, setActiveTab] = useState<string>(() => {
-    try {
-      const s = JSON.parse(sessionStorage.getItem('billah_session_v1') || 'null');
-      if (s?.tab) return s.tab;
-    } catch { /* ignore */ }
-    return 'dashboard';
-  });
+  // App state — authentication is derived from the server session, never from
+  // client storage (spec #1/#5: no sessionStorage/localStorage auth).
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [currentRole, setCurrentRole] = useState<UserRole>('business_admin');
+  const [activeTab, setActiveTab] = useState<string>('dashboard');
   // Back-context: remembers where an invoice edit was launched from
   const [returnTab, setReturnTab] = useState<string>('invoices');
   const [returnCustomerId, setReturnCustomerId] = useState<string | null>(null);
@@ -78,21 +61,23 @@ export function App() {
   const [products, setProducts] = useState<Product[]>(initialProducts);
   const [kpis, setKpis] = useState<PlatformKPIs>(initialPlatformKPIs);
 
-  // Super Admin Configuration with persistent LocalStorage
+  // Super Admin Configuration (display only — the real password lives server-side
+  // as a bcrypt hash in SUPER_ADMIN_PASSWORD; this client config never holds a
+  // usable credential). (spec #2/#9: no plaintext passwords in the frontend)
   const [superAdminConfig, setSuperAdminConfig] = useState<SuperAdminConfig>(() => {
     const saved = localStorage.getItem('my_invoice_superadmin_config');
     if (saved) {
       try {
-        return JSON.parse(saved);
-      } catch (e) {
-        // fallback
-      }
+        const parsed = JSON.parse(saved);
+        delete parsed.password; // never keep a usable password client-side
+        return parsed;
+      } catch (e) { /* fallback */ }
     }
     return {
       username: 'superadmin',
       email: 'admin@malaysiainvoice.my',
       displayName: 'Master Administrator',
-      password: 'Admin123!',
+      password: '',
       phone: '+60 3-8000 8000',
       securityRole: 'Root Authority',
     };
@@ -120,30 +105,69 @@ export function App() {
   });
   const [toast, setToast] = useState<string | null>(null);
 
-  // --- Session + active-tab persistence (tenant login lands on Create Invoice;
-  //     refresh keeps the user on the same page) ---
-  const SESSION_KEY = 'billah_session_v1';
-  // Holds the tenant id chosen at LOGIN (authoritative source for "who am I").
-  // Restored from sessionStorage so a refresh restores the SAME authorized tenant
-  // and NEVER silently falls back to the first tenant in the array.
-  // NOTE: useRef does not lazy-init, so derive the initial value via useState.
-  const [initialTenantId] = useState<string | null>(() => {
-    try {
-      const s = JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null');
-      return s?.tenantId || null;
-    } catch { return null; }
-  });
-  const tenantIdRef = useRef<string | null>(initialTenantId);
+  // Holds the logged-in tenant id (authoritative source for "who am I").
+  // Derived from the server session — never from client storage (spec #16).
+  const tenantIdRef = useRef<string | null>(null);
 
-  // Persist on any change so a refresh restores the exact page the user was on.
-  useEffect(() => {
+  // --- Session bootstrap: derive identity from the server session (spec #1/#5).
+  // No client-side auth state. On mount we ask the server who we are.
+  const [authBooting, setAuthBooting] = useState(true);
+  const loadSession = async () => {
     try {
-      sessionStorage.setItem(
-        SESSION_KEY,
-        JSON.stringify({ role: currentRole, tenantId: activeTenant?.id, tab: activeTab })
-      );
-    } catch { /* ignore */ }
-  }, [activeTab, currentRole, activeTenant]);
+      const { ok, data } = await apiGet<{ authenticated: boolean; role?: string; tenantId?: string; tenant?: any }>('/api/auth/me');
+      if (ok && data.authenticated) {
+        setCurrentRole(data.role as UserRole);
+        if (data.tenantId) {
+          tenantIdRef.current = data.tenantId;
+          if (data.tenant) {
+            const safe = { ...data.tenant }; delete safe.password;
+            setActiveTenant(safe);
+          }
+        }
+        setActiveTab(data.role === 'super_admin' ? 'admin-overview' : 'dashboard');
+        setIsAuthenticated(true);
+      } else {
+        setIsAuthenticated(false);
+      }
+    } catch {
+      setIsAuthenticated(false);
+    } finally {
+      setAuthBooting(false);
+    }
+  };
+  useEffect(() => { loadSession(); /* eslint-disable-next-line */ }, []);
+
+  // Fetch initial data from backend API; tenant data is auto-scoped by the
+  // server to the logged-in tenant (no client tenantId is trusted).
+  useEffect(() => {
+    async function loadData() {
+      try {
+        const [custRes, invRes, prodRes, kpiRes, tenRes] = await Promise.all([
+          apiGet('/api/customers'),
+          apiGet('/api/invoices'),
+          apiGet('/api/products'),
+          apiGet('/api/kpis'),
+          apiGet('/api/tenants'),
+        ]);
+        if (custRes.ok) { const c = await custRes.data; setCustomers(c?.data ?? []); }
+        if (invRes.ok) { const i = await invRes.data; setInvoices(i?.data ?? []); }
+        if (prodRes.ok) { const p = await prodRes.data; setProducts(p?.data ?? []); }
+        if (kpiRes.ok) { const k = await kpiRes.data; if (k?.data?.platform) setKpis(k.data.platform); }
+        if (tenRes.ok) {
+          const t = await tenRes.data;
+          if (t?.data?.length) {
+            const safe = t.data.map((x: any) => { const c = { ...x }; delete c.password; return c; });
+            setTenants(safe);
+            if (tenantIdRef.current) {
+              const m = safe.find((x: any) => x.id === tenantIdRef.current);
+              if (m) setActiveTenant(m);
+            }
+          }
+        }
+      } catch (e) { /* server unavailable; app shows sign-in */ }
+    }
+    if (isAuthenticated) loadData();
+  }, [isAuthenticated]);
 
   const handleNavigate = (tab: string) => {
     setActiveTab(tab);
@@ -171,59 +195,30 @@ export function App() {
     setSidebarOpen(false);
   };
 
-  // Fetch initial data from backend API; scope tenant data to the logged-in tenant
-  // and restore the SAME authorized tenant across refresh (never tenants[0]).
-  useEffect(() => {
-    async function loadData() {
-      try {
-        const myTenantId = tenantIdRef.current;
-        const [tenantsRes, custRes, invRes, prodRes, kpiRes] = await Promise.all([
-          fetch('/api/tenants'),
-          fetch(`/api/customers${myTenantId ? `?tenantId=${encodeURIComponent(myTenantId)}` : ''}`),
-          fetch(`/api/invoices${myTenantId ? `?tenantId=${encodeURIComponent(myTenantId)}` : ''}`),
-          fetch('/api/products'),
-          fetch('/api/kpis'),
-        ]);
+  // Keyboard shortcut CMD+K / CTRL+K
+  const handleLogout = async () => {
+    try { await apiPost('/api/auth/logout'); } catch { /* ignore */ }
+    setIsAuthenticated(false);
+    tenantIdRef.current = null;
+    setCurrentRole('business_admin');
+    setActiveTenant(initialTenants[0]);
+  };
 
-        if (tenantsRes.ok) {
-          const tData = await tenantsRes.json();
-          if (tData.data?.length) {
-            setTenants(tData.data);
-            // Restore the exact authorized tenant (the one chosen at login),
-            // NOT the first tenant in the array.
-            const saved = myTenantId;
-            const match = saved ? tData.data.find((t: any) => t.id === saved) : undefined;
-            if (match) {
-              setActiveTenant(match);
-            } else if (!activeTenant?.id) {
-              // No saved session and not yet authenticated: leave undefined so the
-              // auth screen handles it — do NOT default to tenants[0].
-              setActiveTenant(tData.data[0]);
-            }
-          }
-        }
-        if (custRes.ok) {
-          const cData = await custRes.json();
-          setCustomers(cData.data ?? []);
-        }
-        if (invRes.ok) {
-          const iData = await invRes.json();
-          setInvoices(iData.data ?? []);
-        }
-        if (prodRes.ok) {
-          const pData = await prodRes.json();
-          setProducts(pData.data ?? []);
-        }
-        if (kpiRes.ok) {
-          const kData = await kpiRes.json();
-          if (kData.data?.platform) setKpis(kData.data.platform);
-        }
-      } catch (e) {
-        console.log('Running in local client state');
-      }
+  // Server-driven sign-in: credentials validated server-side against bcrypt hashes.
+  // Returns { ok, error } so the sign-in view can render server errors.
+  const handleSignIn = async (username: string, password: string, mode: 'tenant' | 'super_admin'): Promise<{ ok: boolean; error?: string }> => {
+    const { ok, data } = await apiPost('/api/auth/login', { username, password, mode });
+    if (!ok) return { ok: false, error: data?.error || 'Invalid credentials.' };
+    tenantIdRef.current = data.tenantId || null;
+    if (data.tenantId && data.tenant) {
+      const safe = { ...data.tenant }; delete safe.password;
+      setActiveTenant(safe);
     }
-    loadData();
-  }, []);
+    setCurrentRole(data.role);
+    setActiveTab(data.role === 'super_admin' ? 'admin-overview' : 'create-invoice');
+    setIsAuthenticated(true);
+    return { ok: true };
+  };
 
   // Keyboard shortcut CMD+K / CTRL+K
   useEffect(() => {
@@ -245,66 +240,42 @@ export function App() {
     setIsRoleGateOpen(true);
   };
 
-  // Called by the gate modal with the entered password.
-  const handleRoleGateSubmit = (entered: string) => {
+  // Called by the gate modal with the entered password. Authentication is
+  // delegated to the server (no client-side password comparison — spec #2).
+  const handleRoleGateSubmit = async (entered: string) => {
     const target = pendingRoleSwitch;
     if (!target) return;
-    const ok =
-      target === 'super_admin'
-        ? entered === superAdminConfig.password
-        : activeTenant?.password === entered;
-    if (!ok) {
-      // Surface a generic error; keep the modal open so they can retry.
-      setRoleGateError('Incorrect password. Please try again.');
-      return;
-    }
-    // Password correct -> perform the switch.
+    let result;
     if (target === 'super_admin') {
-      tenantIdRef.current = null;
-      setCurrentRole('super_admin');
-      setActiveTab('admin-overview');
+      result = await handleSignIn('superadmin', entered, 'super_admin');
     } else {
+      // Switching back to a tenant: authenticate as that tenant using its username.
+      const u = activeTenant?.username || activeTenant?.code;
+      result = await handleSignIn(u, entered, 'tenant');
+    }
+    if (result?.ok) {
+      setIsRoleGateOpen(false);
+      setPendingRoleSwitch(null);
+      setRoleGateError('');
+    } else {
+      setRoleGateError('Incorrect password. Please try again.');
+    }
+  };
+
+  // Impersonate a specific tenant (admin-only). Uses a dedicated server endpoint
+  // that switches the server session to the target tenant; no tenant password needed
+  // because the caller is already an authenticated super admin (spec #4).
+  const handleImpersonateTenant = async (tenant: Tenant) => {
+    const { ok, data } = await apiPost('/api/auth/impersonate', { tenantId: tenant.id });
+    if (ok && data?.ok) {
+      tenantIdRef.current = tenant.id;
+      const safe = { ...tenant }; delete safe.password;
+      setActiveTenant(safe);
       setCurrentRole('business_admin');
       setActiveTab('dashboard');
-    }
-    setIsRoleGateOpen(false);
-    setPendingRoleSwitch(null);
-    setRoleGateError('');
-  };
-
-  // Impersonate a specific tenant
-  const handleImpersonateTenant = (tenant: Tenant) => {
-    tenantIdRef.current = tenant.id;
-    setActiveTenant(tenant);
-    setCurrentRole('business_admin');
-    setActiveTab('dashboard');
-    setIsImpersonateOpen(false);
-  };
-
-  // Sign out handler
-  const handleLogout = () => {
-    setIsAuthenticated(false);
-    tenantIdRef.current = null; // clear previous tenant context (no stale reuse)
-    // Clear the persisted session so a fresh visit lands on the sign-in screen.
-    try { sessionStorage.removeItem('billah_session_v1'); } catch { /* ignore */ }
-  };
-
-  // Sign in handler
-  const handleSignIn = (role: UserRole, tenant?: Tenant) => {
-    setIsAuthenticated(true);
-    setCurrentRole(role);
-    if (role === 'business_admin' && tenant) {
-      tenantIdRef.current = tenant.id; // authoritative: the logged-in tenant
-      setActiveTenant(tenant);
-      // Tenant users land directly on Create Invoice (their primary action).
-      setActiveTab('create-invoice');
-    } else if (role === 'super_admin') {
-      tenantIdRef.current = null; // super admin is not a single tenant
-      setActiveTab('admin-overview');
+      setIsImpersonateOpen(false);
     } else {
-      // Non-impersonated tenant keeps dashboard fallback for safety.
-      tenantIdRef.current = tenant?.id ?? null;
-      setActiveTab('create-invoice');
+      setIsImpersonateOpen(false);
     }
   };
 
@@ -529,7 +500,7 @@ export function App() {
         tenants={tenants}
         adminConfig={superAdminConfig}
         initialMode={currentRole === 'super_admin' ? 'super_admin' : 'tenant'}
-        onSignInSuccess={handleSignIn}
+        onLogin={handleSignIn}
       />
     );
   }
@@ -680,7 +651,7 @@ export function App() {
                 <AuthSignInView
                   tenants={tenants}
                   initialMode="tenant"
-                  onSignInSuccess={handleSignIn}
+                  onLogin={handleSignIn}
                   onBackToApp={() => setActiveTab('dashboard')}
                 />
               )}
@@ -795,7 +766,7 @@ export function App() {
                   tenants={tenants}
                   adminConfig={superAdminConfig}
                   initialMode="super_admin"
-                  onSignInSuccess={handleSignIn}
+                  onLogin={handleSignIn}
                   onBackToApp={() => setActiveTab('admin-overview')}
                 />
               )}

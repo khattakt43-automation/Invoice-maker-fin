@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Tenant } from '../types';
+import { apiFetch } from '../lib/api';
 import {
   X,
   Building2,

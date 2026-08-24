@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Invoice } from '../types';
 import { X, Send, Mail, Copy, Check, MessageSquare, PhoneCall, Share2, ExternalLink, Globe } from 'lucide-react';
+import { apiFetch } from "./lib/api";
 
 interface SendInvoiceModalProps {
   isOpen: boolean;

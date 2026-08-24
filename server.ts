@@ -1,5 +1,6 @@
 import express from "express";
 import path from "path";
+import cookieParser from "cookie-parser";
 import { createServer as createViteServer } from "vite";
 import {
   initialTenants,
@@ -11,6 +12,17 @@ import {
 } from "./src/data/mockData";
 import { Tenant, Customer, Invoice, Product } from "./src/types";
 import { db, save } from "./src/server/db";
+import bcrypt from "bcryptjs";
+import {
+  attachSession,
+  requireAuth,
+  requireTenant,
+  requireAdmin,
+  requireCsrf,
+  authRouter,
+  CSRF_COOKIE,
+} from "./src/server/authRoutes";
+import { auditLog, getClientIp } from "./src/server/auth";
 
 // Seed WhatsApp entitlement defaults (kept for type references in this file).
 import { emptyUsage } from "./src/services/whatsappEntitlement";
@@ -21,6 +33,68 @@ async function startServer() {
 
   app.use(express.json({ limit: '25mb' }));
   app.use(express.urlencoded({ extended: true, limit: '25mb' }));
+  app.use(cookieParser());
+
+  // ---- Security headers (spec #11) ----
+  app.use((req, res, next) => {
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("Frame-Options", "DENY");
+    res.setHeader(
+      "Content-Security-Policy",
+      "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://va.vercel-scripts.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none';"
+    );
+    res.setHeader("Permissions-Policy", "geolocation=(), microphone=(), camera=()");
+    // HSTS only once behind real HTTPS (spec #8). Harmless to pre-set; browsers
+    // ignore it over plain HTTP anyway.
+    if (req.secure || req.headers["x-forwarded-proto"] === "https") {
+      res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+    }
+    next();
+  });
+
+  // ---- CORS: no wildcard for private APIs (spec #11) ----
+  const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
+    .split(",").map((s) => s.trim()).filter(Boolean);
+  app.use((req, res, next) => {
+    const origin = req.headers.origin as string | undefined;
+    if (origin && ALLOWED_ORIGINS.length && ALLOWED_ORIGINS.includes(origin)) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-CSRF-Token");
+      res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+    }
+    if (req.method === "OPTIONS") return res.sendStatus(204);
+    next();
+  });
+
+  // ---- Auth: attach session + CSRF on state-changing; auth router (public) ----
+  app.use(attachSession);
+  app.use(authRouter);
+
+  // ---- Global API guard: every /api route except health + auth requires an
+  // authenticated session, and every state-changing request requires a valid
+  // CSRF token. Tenant/Admin scoping is enforced per-route below. (spec #1,#5,#12) ----
+  app.use("/api", (req, res, next) => {
+    const p = req.path;
+    if (p === "/health" || p.startsWith("/auth/")) return next();
+    if (!req.session) {
+      auditLog({ action: "auth.api_unauthorized", ip: getClientIp(req), success: false, detail: p });
+      return res.status(401).json({ error: "Authentication required." });
+    }
+    // CSRF for non-safe methods
+    if (!["GET", "HEAD", "OPTIONS"].includes(req.method)) {
+      const headerToken = req.headers["x-csrf-token"] as string;
+      const cookieToken = req.cookies?.[CSRF_COOKIE];
+      const sessionToken = req.session?.csrf;
+      if (!headerToken || !cookieToken || !sessionToken || headerToken !== cookieToken || headerToken !== sessionToken) {
+        auditLog({ action: "csrf.api_failed", tenantId: req.session?.tenantId, ip: getClientIp(req), success: false, detail: p });
+        return res.status(403).json({ error: "CSRF validation failed." });
+      }
+    }
+    next();
+  });
 
   // Persistent data store (write-through JSON file). This is the single source
   // of truth: every mutation is persisted immediately and reads always reflect
@@ -44,17 +118,24 @@ async function startServer() {
 
   // --- TENANTS API ---
   app.get("/api/tenants", (req, res) => {
-    res.json({ data: tenants });
+    // Tenant sees ONLY their own tenant record. Admin sees all. (spec #3/#4)
+    if (req.session!.role === "tenant") {
+      const self = tenants.find((t) => t.id === req.session!.tenantId);
+      const safe = self ? (() => { const c = { ...self }; delete c.password; return c; })() : null;
+      return res.json({ data: safe ? [safe] : [] });
+    }
+    const safe = tenants.map((t) => { const c = { ...t }; delete c.password; return c; });
+    res.json({ data: safe });
   });
 
-  app.post("/api/tenants", (req, res) => {
+  app.post("/api/tenants", requireAdmin, (req, res) => {
     const newTenant: Tenant = {
       id: `tenant-${Date.now()}`,
       code: `TEN-${String(Math.floor(1000 + Math.random() * 9000))}`,
       name: req.body.name || "New Business Sdn Bhd",
       initials: req.body.initials || (req.body.name ? req.body.name.substring(0, 2).toUpperCase() : "NB"),
       username: req.body.username || req.body.adminEmail?.split('@')[0] || "tenantadmin",
-      password: req.body.password || "Password123!",
+      password: req.body.password ? bcrypt.hashSync(req.body.password, 12) : bcrypt.hashSync("Password123!", 12),
       adminName: req.body.adminName || "Admin User",
       adminEmail: req.body.adminEmail || "admin@business.my",
       phone: req.body.phone || "+60 12-000 0000",
@@ -77,7 +158,7 @@ async function startServer() {
     tenants.unshift(newTenant);
     platformKPIs.totalTenants += 1;
     platformKPIs.activeTenants += 1;
-    // Admin notification: new tenant created (context-aware, platform-scoped)
+    auditLog({ action: "tenant.created", tenantId: newTenant.id, role: "super_admin", ip: getClientIp(req), success: true });
     notifications.unshift({
       id: `ntf-admin-${Date.now()}`,
       tenantId: "platform",
@@ -88,19 +169,23 @@ async function startServer() {
       link: { tab: "admin-overview" },
     });
     save();
-    res.status(201).json({ data: newTenant, message: "Tenant created successfully" });
+    const safe = { ...newTenant }; delete safe.password;
+    res.status(201).json({ data: safe, message: "Tenant created successfully" });
   });
 
-  app.patch("/api/tenants/:id", (req, res) => {
+  app.patch("/api/tenants/:id", requireAdmin, (req, res) => {
     const { id } = req.params;
     const index = tenants.findIndex((t) => t.id === id);
     if (index === -1) {
       return res.status(404).json({ error: "Tenant not found" });
     }
-
     const prev = tenants[index];
-    tenants[index] = { ...tenants[index], ...req.body };
-    // Notify admin on suspension / reactivation changes
+    // Never allow a tenant to escalate to super admin via this route.
+    const update = { ...req.body };
+    if (update.role) delete update.role;
+    if (update.password) update.password = bcrypt.hashSync(update.password, 12);
+    tenants[index] = { ...tenants[index], ...update };
+    auditLog({ action: "tenant.updated", tenantId: id, role: "super_admin", ip: getClientIp(req), success: true, detail: prev.status !== tenants[index].status ? `status->${tenants[index].status}` : "" });
     if (req.body.status && req.body.status !== prev.status) {
       const suspended = /suspend/i.test(req.body.status);
       notifications.unshift({
@@ -114,18 +199,19 @@ async function startServer() {
       });
     }
     save();
-    res.json({ data: tenants[index], message: "Tenant updated successfully" });
+    const safe = { ...tenants[index] }; delete safe.password;
+    res.json({ data: safe, message: "Tenant updated successfully" });
   });
 
-  // --- CUSTOMERS API ---
+  // --- CUSTOMERS API (tenant-scoped: server derives tenant from session) ---
   app.get("/api/customers", (req, res) => {
-    const { tenantId, search, sortBy } = req.query;
+    const role = req.session!.role;
+    // Tenants can ONLY see their own customers. Admin may pass tenantId to scope.
+    const tenantId = role === "tenant" ? req.session!.tenantId : (req.query.tenantId as string | undefined);
     let filtered = [...customers];
+    if (tenantId) filtered = filtered.filter((c) => c.tenantId === tenantId);
 
-    if (tenantId) {
-      filtered = filtered.filter((c) => c.tenantId === tenantId);
-    }
-
+    const { search, sortBy } = req.query;
     if (search) {
       const q = String(search).toLowerCase();
       filtered = filtered.filter(
@@ -136,32 +222,21 @@ async function startServer() {
           c.contactPerson.toLowerCase().includes(q)
       );
     }
-
-    if (sortBy === "Name (A-Z)") {
-      filtered.sort((a, b) => a.name.localeCompare(b.name));
-    } else if (sortBy === "Recent Activity") {
-      filtered.sort((a, b) => b.ltv - a.ltv);
-    } else {
-      // Default: Outstanding Balance descending
-      filtered.sort((a, b) => b.outstandingBalance - a.outstandingBalance);
-    }
-
+    if (sortBy === "Name (A-Z)") filtered.sort((a, b) => a.name.localeCompare(b.name));
+    else if (sortBy === "Recent Activity") filtered.sort((a, b) => b.ltv - a.ltv);
+    else filtered.sort((a, b) => b.outstandingBalance - a.outstandingBalance);
     res.json({ data: filtered });
   });
 
   app.post("/api/customers", (req, res) => {
+    // Tenant-scoped: ignore any client tenantId, force the session tenant.
+    const tenantId = req.session!.role === "tenant" ? req.session!.tenantId! : (req.body.tenantId || "tenant-tech-solutions");
     const initials = req.body.name
-      ? req.body.name
-          .split(" ")
-          .map((n: string) => n[0])
-          .slice(0, 2)
-          .join("")
-          .toUpperCase()
+      ? req.body.name.split(" ").map((n: string) => n[0]).slice(0, 2).join("").toUpperCase()
       : "CU";
-
     const newCustomer: Customer = {
       id: `cust-${Date.now()}`,
-      tenantId: req.body.tenantId || "tenant-tech-solutions",
+      tenantId,
       name: req.body.name,
       initials,
       contactPerson: req.body.contactPerson || "Finance Dept",
@@ -175,7 +250,6 @@ async function startServer() {
       joinedDate: new Date().toLocaleDateString("en-US", { month: "short", year: "numeric" }),
       recentInvoices: [],
     };
-
     customers.unshift(newCustomer);
     save();
     res.status(201).json({ data: newCustomer, message: "Customer created successfully" });
@@ -183,11 +257,13 @@ async function startServer() {
 
   app.patch("/api/customers/:id", (req, res) => {
     const { id } = req.params;
+    // Ownership check: tenants may only edit their own customer.
     const index = customers.findIndex((c) => c.id === id);
-    if (index === -1) {
-      return res.status(404).json({ error: "Customer not found" });
+    if (index === -1) return res.status(404).json({ error: "Customer not found" });
+    if (req.session!.role === "tenant" && customers[index].tenantId !== req.session!.tenantId) {
+      auditLog({ action: "authz.cross_tenant_block", tenantId: req.session!.tenantId, ip: getClientIp(req), success: false, detail: `customer ${id}` });
+      return res.status(403).json({ error: "Forbidden: not your resource." });
     }
-
     customers[index] = { ...customers[index], ...req.body };
     save();
     res.json({ data: customers[index], message: "Customer updated successfully" });
@@ -195,54 +271,42 @@ async function startServer() {
 
   app.delete("/api/customers/:id", (req, res) => {
     const index = customers.findIndex((c) => c.id === req.params.id);
-    if (index === -1) {
-      return res.status(404).json({ error: "Customer not found" });
+    if (index === -1) return res.status(404).json({ error: "Customer not found" });
+    if (req.session!.role === "tenant" && customers[index].tenantId !== req.session!.tenantId) {
+      auditLog({ action: "authz.cross_tenant_block", tenantId: req.session!.tenantId, ip: getClientIp(req), success: false, detail: `customer ${req.params.id}` });
+      return res.status(403).json({ error: "Forbidden: not your resource." });
     }
-    const [removed] = customers.splice(index, 1);
+    customers.splice(index, 1);
     save();
-    res.json({ data: removed, message: "Customer deleted successfully" });
+    res.json({ data: { id: req.params.id }, message: "Customer deleted successfully" });
   });
 
-  // --- INVOICES API ---
+  // --- INVOICES API (tenant-scoped: server derives tenant from session) ---
   app.get("/api/invoices", (req, res) => {
-    const { tenantId, status, customerId } = req.query;
+    const role = req.session!.role;
+    // Tenants see ONLY their own invoices. Admin may scope via tenantId query.
+    const tenantId = role === "tenant" ? req.session!.tenantId : (req.query.tenantId as string | undefined);
     let filtered = [...invoices];
-
-    if (tenantId) {
-      filtered = filtered.filter((i) => i.tenantId === tenantId);
-    }
+    if (tenantId) filtered = filtered.filter((i) => i.tenantId === tenantId);
+    const { status, customerId } = req.query;
     if (status && status !== "All") {
       filtered = filtered.filter((i) => i.status.toLowerCase() === String(status).toLowerCase());
     }
-    if (customerId) {
-      filtered = filtered.filter((i) => i.customerId === customerId);
-    }
-
+    if (customerId) filtered = filtered.filter((i) => i.customerId === customerId);
     res.json({ data: filtered });
   });
 
   app.post("/api/invoices", (req, res) => {
+    // Tenant-scoped: force the session tenant; never trust client tenantId.
+    const tenantId = req.session!.role === "tenant" ? req.session!.tenantId! : (req.body.tenantId || "tenant-tech-solutions");
     const invCount = invoices.length + 1;
     const invNumber = req.body.invoiceNumber || `INV-2023-${String(1040 + invCount)}`;
 
-    // Honor EACH line item's own tax rate (0% / 8% / 6%) instead of one
-    // invoice-level rate applied to the whole subtotal. Fixes "no-tax invoice
-    // still charged 8% SST".
-    const items = (req.body.items || []).map((it: any) => ({
-      ...it,
-      taxRate: Number(it.taxRate) || 0,
-    }));
-    const subtotal = items.reduce(
-      (acc: number, item: any) => acc + (Number(item.unitPrice) || 0) * (Number(item.quantity) || 1),
-      0
-    );
-    const taxAmount = items.reduce(
-      (acc: number, item: any) => acc + (Number(item.amount) || (Number(item.unitPrice) || 0) * (Number(item.quantity) || 1)) * (Number(item.taxRate) || 0),
-      0
-    );
+    const items = (req.body.items || []).map((it: any) => ({ ...it, taxRate: Number(it.taxRate) || 0 }));
+    const subtotal = items.reduce((acc: number, item: any) => acc + (Number(item.unitPrice) || 0) * (Number(item.quantity) || 1), 0);
+    const taxAmount = items.reduce((acc: number, item: any) => acc + (Number(item.amount) || (Number(item.unitPrice) || 0) * (Number(item.quantity) || 1)) * (Number(item.taxRate) || 0), 0);
     const totalAmount = subtotal + taxAmount;
 
-    // Auto-create a customer record when a brand-new (manual) customer is billed.
     let customerId = req.body.customerId || "";
     const customerName = req.body.customerName || "Customer Name";
     if (!customerId && customerName && customerName !== "Customer Name") {
@@ -251,72 +315,40 @@ async function startServer() {
         customerId = existing.id;
       } else {
         customerId = `cust-${Date.now()}`;
+        // enforce tenant ownership on auto-created customer
         customers.unshift({
-          id: customerId,
-          name: customerName,
-          email: req.body.customerEmail || "",
-          phone: req.body.customerPhone || "",
-          address: req.body.customerAddress || "",
-          tin: req.body.customerTin || "",
-          outstandingBalance: 0,
-          ltv: 0,
-          status: "CURRENT",
-          recentInvoices: [],
-          tenantId: req.body.tenantId || "tenant-tech-solutions",
+          id: customerId, name: customerName, email: req.body.customerEmail || "",
+          phone: req.body.customerPhone || "", address: req.body.customerAddress || "",
+          tin: req.body.customerTin || "", outstandingBalance: 0, ltv: 0, status: "CURRENT",
+          recentInvoices: [], tenantId,
         });
       }
     }
 
     const newInvoice: Invoice = {
-      id: `inv-${Date.now()}`,
-      invoiceNumber: invNumber,
-      tenantId: req.body.tenantId || "tenant-tech-solutions",
-      customerId: customerId || "cust-custom",
-      customerName,
-      customerEmail: req.body.customerEmail || "",
-      customerPhone: req.body.customerPhone || "",
-      customerAddress: req.body.customerAddress || "",
-      customerTin: req.body.customerTin || "",
+      id: `inv-${Date.now()}`, invoiceNumber: invNumber, tenantId,
+      customerId: customerId || "cust-custom", customerName,
+      customerEmail: req.body.customerEmail || "", customerPhone: req.body.customerPhone || "",
+      customerAddress: req.body.customerAddress || "", customerTin: req.body.customerTin || "",
       date: req.body.date || new Date().toISOString().split("T")[0],
       dueDate: req.body.dueDate || new Date(Date.now() + 30 * 86400000).toISOString().split("T")[0],
-      items,
-      subtotal,
-      taxRate: req.body.taxRate !== undefined ? Number(req.body.taxRate) : 0.0,
-      taxAmount,
-      totalAmount,
-      currency: req.body.currency || "MYR",
-      status: req.body.status || "Unpaid",
-      notes: req.body.notes || "Thank you for your business.",
-      paperSize: req.body.paperSize || "A4 (Standard)",
-      paymentTerms: req.body.paymentTerms || "Payment due within 30 days.",
-      docTitle: req.body.docTitle,
+      items, subtotal, taxRate: req.body.taxRate !== undefined ? Number(req.body.taxRate) : 0.0, taxAmount,
+      totalAmount, currency: req.body.currency || "MYR", status: req.body.status || "Unpaid",
+      notes: req.body.notes || "Thank you for your business.", paperSize: req.body.paperSize || "A4 (Standard)",
+      paymentTerms: req.body.paymentTerms || "Payment due within 30 days.", docTitle: req.body.docTitle,
       showDocTitle: req.body.showDocTitle !== undefined ? req.body.showDocTitle : true,
-      notesAlign: req.body.notesAlign || "left",
-      qrData: req.body.qrData || "",
-      qrSize: req.body.qrSize || 110,
-      qrAlign: req.body.qrAlign || "right",
-      createdAt: new Date().toISOString(),
+      notesAlign: req.body.notesAlign || "left", qrData: req.body.qrData || "", qrSize: req.body.qrSize || 110,
+      qrAlign: req.body.qrAlign || "right", createdAt: new Date().toISOString(),
     };
 
     invoices.unshift(newInvoice);
 
-    // Update customer outstanding & LTV
     const customer = customers.find((c) => c.id === newInvoice.customerId || c.name === newInvoice.customerName);
     if (customer) {
-      if (newInvoice.status !== "Paid") {
-        customer.outstandingBalance += totalAmount;
-        customer.status = "CURRENT";
-      }
+      if (newInvoice.status !== "Paid") { customer.outstandingBalance += totalAmount; customer.status = "CURRENT"; }
       customer.ltv += totalAmount;
       if (!customer.recentInvoices) customer.recentInvoices = [];
-      customer.recentInvoices.unshift({
-        id: newInvoice.id,
-        invoiceNumber: newInvoice.invoiceNumber,
-        date: newInvoice.date,
-        dueDate: newInvoice.dueDate,
-        amount: totalAmount,
-        status: newInvoice.status,
-      });
+      customer.recentInvoices.unshift({ id: newInvoice.id, invoiceNumber: newInvoice.invoiceNumber, date: newInvoice.date, dueDate: newInvoice.dueDate, amount: totalAmount, status: newInvoice.status });
     }
 
     save();
@@ -325,95 +357,50 @@ async function startServer() {
 
   app.put("/api/invoices/:id", (req, res) => {
     const index = invoices.findIndex((i) => i.id === req.params.id);
-    if (index === -1) {
-      return res.status(404).json({ error: "Invoice not found" });
+    if (index === -1) return res.status(404).json({ error: "Invoice not found" });
+    // Ownership check: tenants may only edit their own invoice.
+    if (req.session!.role === "tenant" && invoices[index].tenantId !== req.session!.tenantId) {
+      auditLog({ action: "authz.cross_tenant_block", tenantId: req.session!.tenantId, ip: getClientIp(req), success: false, detail: `invoice ${req.params.id}` });
+      return res.status(403).json({ error: "Forbidden: not your resource." });
     }
     const existing = invoices[index];
-    // Per-item tax (fixes wholesale invoice-level taxRate being applied).
-    const items = (req.body.items || existing.items || []).map((it: any) => ({
-      ...it,
-      taxRate: Number(it.taxRate) || 0,
-    }));
-    const subtotal = items.reduce(
-      (acc, item) => acc + (Number(item.unitPrice) || 0) * (Number(item.quantity) || 1),
-      0
-    );
-    const taxAmount = items.reduce(
-      (acc, item) => acc + (Number(item.amount) || (Number(item.unitPrice) || 0) * (Number(item.quantity) || 1)) * (Number(item.taxRate) || 0),
-      0
-    );
+    const items = (req.body.items || existing.items || []).map((it: any) => ({ ...it, taxRate: Number(it.taxRate) || 0 }));
+    const subtotal = items.reduce((acc: number, item: any) => acc + (Number(item.unitPrice) || 0) * (Number(item.quantity) || 1), 0);
+    const taxAmount = items.reduce((acc: number, item: any) => acc + (Number(item.amount) || (Number(item.unitPrice) || 0) * (Number(item.quantity) || 1)) * (Number(item.taxRate) || 0), 0);
     const totalAmount = subtotal + taxAmount;
 
-    // Auto-create / match customer for manual entries on update too.
     let customerId = req.body.customerId || existing.customerId || "";
     const customerName = req.body.customerName || existing.customerName || "Customer Name";
+    const tenantId = req.session!.role === "tenant" ? req.session!.tenantId! : (req.body.tenantId || existing.tenantId);
     if (!customerId && customerName && customerName !== "Customer Name") {
       const match = customers.find((c) => c.name.toLowerCase() === customerName.toLowerCase());
-      if (match) {
-        customerId = match.id;
-      } else {
+      if (match) { customerId = match.id; } else {
         customerId = `cust-${Date.now()}`;
-        customers.unshift({
-          id: customerId,
-          name: customerName,
-          email: req.body.customerEmail || existing.customerEmail || "",
-          phone: req.body.customerPhone || existing.customerPhone || "",
-          address: req.body.customerAddress || existing.customerAddress || "",
-          tin: req.body.customerTin || existing.customerTin || "",
-          outstandingBalance: 0,
-          ltv: 0,
-          status: "CURRENT",
-          recentInvoices: [],
-          tenantId: req.body.tenantId || existing.tenantId,
-        });
+        customers.unshift({ id: customerId, name: customerName, email: req.body.customerEmail || existing.customerEmail || "", phone: req.body.customerPhone || existing.customerPhone || "", address: req.body.customerAddress || existing.customerAddress || "", tin: req.body.customerTin || existing.customerTin || "", outstandingBalance: 0, ltv: 0, status: "CURRENT", recentInvoices: [], tenantId });
       }
     }
 
     const updated: Invoice = {
-      ...existing,
-      invoiceNumber: req.body.invoiceNumber || existing.invoiceNumber,
-      tenantId: req.body.tenantId || existing.tenantId,
-      customerId: customerId || existing.customerId,
-      customerName,
-      customerEmail: req.body.customerEmail || existing.customerEmail,
-      customerPhone: req.body.customerPhone || existing.customerPhone,
-      customerAddress: req.body.customerAddress || existing.customerAddress,
-      customerTin: req.body.customerTin || existing.customerTin,
-      date: req.body.date || existing.date,
-      dueDate: req.body.dueDate || existing.dueDate,
-      items,
-      subtotal,
-      taxRate: req.body.taxRate !== undefined ? Number(req.body.taxRate) : existing.taxRate,
-      taxAmount,
-      totalAmount,
-      currency: req.body.currency || existing.currency,
-      status: req.body.status || existing.status,
-      notes: req.body.notes || existing.notes,
-      paperSize: req.body.paperSize || existing.paperSize,
-      paymentTerms: req.body.paymentTerms || existing.paymentTerms,
-      docTitle: req.body.docTitle !== undefined ? req.body.docTitle : existing.docTitle,
+      ...existing, invoiceNumber: req.body.invoiceNumber || existing.invoiceNumber, tenantId,
+      customerId: customerId || existing.customerId, customerName,
+      customerEmail: req.body.customerEmail || existing.customerEmail, customerPhone: req.body.customerPhone || existing.customerPhone,
+      customerAddress: req.body.customerAddress || existing.customerAddress, customerTin: req.body.customerTin || existing.customerTin,
+      date: req.body.date || existing.date, dueDate: req.body.dueDate || existing.dueDate, items, subtotal,
+      taxRate: req.body.taxRate !== undefined ? Number(req.body.taxRate) : existing.taxRate, taxAmount, totalAmount,
+      currency: req.body.currency || existing.currency, status: req.body.status || existing.status,
+      notes: req.body.notes || existing.notes, paperSize: req.body.paperSize || existing.paperSize,
+      paymentTerms: req.body.paymentTerms || existing.paymentTerms, docTitle: req.body.docTitle !== undefined ? req.body.docTitle : existing.docTitle,
       showDocTitle: req.body.showDocTitle !== undefined ? req.body.showDocTitle : existing.showDocTitle,
-      notesAlign: req.body.notesAlign || existing.notesAlign,
-      qrData: req.body.qrData !== undefined ? req.body.qrData : existing.qrData,
-      qrSize: req.body.qrSize || existing.qrSize,
-      qrAlign: req.body.qrAlign || existing.qrAlign,
-      updatedAt: new Date().toISOString(),
+      notesAlign: req.body.notesAlign || existing.notesAlign, qrData: req.body.qrData !== undefined ? req.body.qrData : existing.qrData,
+      qrSize: req.body.qrSize || existing.qrSize, qrAlign: req.body.qrAlign || existing.qrAlign, updatedAt: new Date().toISOString(),
     };
 
     invoices[index] = updated;
 
-    // Keep the customer recentInvoices entry in sync
     const cust = customers.find((c) => c.id === updated.customerId || c.name === updated.customerName);
     if (cust && cust.recentInvoices) {
       cust.recentInvoices = cust.recentInvoices.filter((r) => r.id !== updated.id);
-      cust.recentInvoices.unshift({
-        id: updated.id,
-        invoiceNumber: updated.invoiceNumber,
-        date: updated.date,
-        dueDate: updated.dueDate,
-        amount: totalAmount,
-        status: updated.status,
-      });
+      cust.recentInvoices.unshift({ id: updated.id, invoiceNumber: updated.invoiceNumber, date: updated.date, dueDate: updated.dueDate, amount: totalAmount, status: updated.status });
     }
 
     save();
@@ -424,41 +411,35 @@ async function startServer() {
     const { id } = req.params;
     const { status } = req.body;
     const inv = invoices.find((i) => i.id === id);
-    if (!inv) {
-      return res.status(404).json({ error: "Invoice not found" });
+    if (!inv) return res.status(404).json({ error: "Invoice not found" });
+    // Ownership check
+    if (req.session!.role === "tenant" && inv.tenantId !== req.session!.tenantId) {
+      auditLog({ action: "authz.cross_tenant_block", tenantId: req.session!.tenantId, ip: getClientIp(req), success: false, detail: `invoice ${id}` });
+      return res.status(403).json({ error: "Forbidden: not your resource." });
     }
-
     const prevStatus = inv.status;
     inv.status = status;
-
-    // Adjust customer balance
     const cust = customers.find((c) => c.id === inv.customerId || c.name === inv.customerName);
     if (cust) {
-      if (prevStatus !== "Paid" && status === "Paid") {
-        cust.outstandingBalance = Math.max(0, cust.outstandingBalance - inv.totalAmount);
-        if (cust.outstandingBalance === 0) cust.status = "PAID";
-      } else if (prevStatus === "Paid" && status !== "Paid") {
-        cust.outstandingBalance += inv.totalAmount;
-        cust.status = status === "Overdue" ? "OVERDUE" : "CURRENT";
-      }
+      if (prevStatus !== "Paid" && status === "Paid") { cust.outstandingBalance = Math.max(0, cust.outstandingBalance - inv.totalAmount); if (cust.outstandingBalance === 0) cust.status = "PAID"; }
+      else if (prevStatus === "Paid" && status !== "Paid") { cust.outstandingBalance += inv.totalAmount; cust.status = status === "Overdue" ? "OVERDUE" : "CURRENT"; }
     }
-
+    save();
     res.json({ data: inv, message: `Invoice status updated to ${status}` });
   });
 
   app.delete("/api/invoices/:id", (req, res) => {
     const index = invoices.findIndex((i) => i.id === req.params.id);
-    if (index === -1) {
-      return res.status(404).json({ error: "Invoice not found" });
+    if (index === -1) return res.status(404).json({ error: "Invoice not found" });
+    if (req.session!.role === "tenant" && invoices[index].tenantId !== req.session!.tenantId) {
+      auditLog({ action: "authz.cross_tenant_block", tenantId: req.session!.tenantId, ip: getClientIp(req), success: false, detail: `invoice ${req.params.id}` });
+      return res.status(403).json({ error: "Forbidden: not your resource." });
     }
     const [removed] = invoices.splice(index, 1);
-    // Revert customer balance if it was paid
     const cust = customers.find((c) => c.id === removed.customerId || c.name === removed.customerName);
-    if (cust && removed.status === "Paid") {
-      cust.outstandingBalance = Math.max(0, cust.outstandingBalance + removed.totalAmount);
-    }
+    if (cust && removed.status === "Paid") { cust.outstandingBalance = Math.max(0, cust.outstandingBalance + removed.totalAmount); }
     save();
-    res.json({ data: removed, message: "Invoice deleted successfully" });
+    res.json({ data: { id: removed.id }, message: "Invoice deleted successfully" });
   });
 
   // --- PRODUCTS API ---
@@ -468,22 +449,29 @@ async function startServer() {
 
   // --- PLATFORM KPIS & RETRACTED STATS ---
   app.get("/api/kpis", (req, res) => {
-    // Dynamic recalculation
+    if (req.session!.role === "tenant") {
+      const tid = req.session!.tenantId;
+      const my = invoices.filter((i) => i.tenantId === tid);
+      const totalSales = my.reduce((acc, inv) => acc + inv.totalAmount, 0);
+      const paidSales = my.filter((i) => i.status === "Paid").reduce((acc, inv) => acc + inv.totalAmount, 0);
+      const unpaidSales = my.filter((i) => i.status === "Unpaid").reduce((acc, inv) => acc + inv.totalAmount, 0);
+      const overdueSales = my.filter((i) => i.status === "Overdue").reduce((acc, inv) => acc + inv.totalAmount, 0);
+      return res.json({
+        data: {
+          platform: { totalTenants: 1, activeTenants: 1 },
+          tenantDashboard: { totalSales, paidSales, unpaidSales, overdueSales, recentInvoices: my.slice(0, 6) },
+        },
+      });
+    }
+    // Admin: full platform stats
     const totalSales = invoices.reduce((acc, inv) => acc + inv.totalAmount, 0);
     const paidSales = invoices.filter((i) => i.status === "Paid").reduce((acc, inv) => acc + inv.totalAmount, 0);
     const unpaidSales = invoices.filter((i) => i.status === "Unpaid").reduce((acc, inv) => acc + inv.totalAmount, 0);
     const overdueSales = invoices.filter((i) => i.status === "Overdue").reduce((acc, inv) => acc + inv.totalAmount, 0);
-
     res.json({
       data: {
         platform: platformKPIs,
-        tenantDashboard: {
-          totalSales,
-          paidSales,
-          unpaidSales,
-          overdueSales,
-          recentInvoices: invoices.slice(0, 6),
-        },
+        tenantDashboard: { totalSales, paidSales, unpaidSales, overdueSales, recentInvoices: invoices.slice(0, 6) },
       },
     });
   });
@@ -664,14 +652,18 @@ async function startServer() {
   });
 
   app.get("/i/:number", (req, res) => {
+    // SECURITY: private invoice view requires authentication and tenant
+    // ownership (or super admin). No public/unauthenticated access.
+    if (!req.session) return res.status(401).send("<h1>Authentication required</h1>");
     const num = String(req.params.number).toLowerCase().replace(/[^a-z0-9]/g, "");
     const inv = invoices.find((i) => i.invoiceNumber.toLowerCase().replace(/[^a-z0-9]/g, "") === num);
     if (!inv) return res.status(404).send("<h1>Invoice not found</h1>");
+    if (req.session.role === "tenant" && inv.tenantId !== req.session.tenantId) {
+      return res.status(403).send("<h1>Forbidden</h1>");
+    }
     const tenant = tenants.find((t) => t.id === inv.tenantId) || initialTenants[0];
     const cust = customers.find((c) => c.id === inv.customerId);
     const html = renderInvoiceHtml(inv, tenant, cust);
-    // ?autoprint=1 -> immediately invoke the browser's print/save-as-PDF dialog
-    // so the download button produces a real PDF (Bug #2).
     const autoPrint = req.query.autoprint === "1";
     const finalHtml = autoPrint
       ? html.replace("</body>", "<script>window.onload=function(){setTimeout(function(){window.print();},250);};</script></body>")
@@ -709,56 +701,44 @@ async function startServer() {
 
   // Plans & Pricing
   app.get("/api/whatsapp/plans", (req, res) => res.json({ data: waPlans }));
-  app.post("/api/whatsapp/plans", (req, res) => {
+  app.post("/api/whatsapp/plans", requireAdmin, (req, res) => {
     const plan = { ...req.body, id: req.body.id || `wa-${Date.now()}` };
     waPlans.push(plan);
     addAudit({ tenantId: "platform", actor: "Super Admin", action: "plan.created", detail: plan.name });
     res.status(201).json({ data: plan });
   });
-  app.patch("/api/whatsapp/plans/:id", (req, res) => {
+  app.patch("/api/whatsapp/plans/:id", requireAdmin, (req, res) => {
     const i = waPlans.findIndex((p) => p.id === req.params.id);
     if (i === -1) return res.status(404).json({ error: "Plan not found" });
     waPlans[i] = { ...waPlans[i], ...req.body };
     addAudit({ tenantId: "platform", actor: "Super Admin", action: "plan.updated", detail: waPlans[i].name });
     res.json({ data: waPlans[i] });
   });
-  app.delete("/api/whatsapp/plans/:id", (req, res) => {
+  app.delete("/api/whatsapp/plans/:id", requireAdmin, (req, res) => {
     const i = waPlans.findIndex((p) => p.id === req.params.id);
     if (i >= 0) waPlans.splice(i, 1);
     save();
     res.json({ message: "Plan deleted" });
   });
 
-  // Subscriptions (per tenant)
-  app.get("/api/whatsapp/subscriptions", (req, res) => {
+  // Subscriptions (per tenant) — admin only
+  app.get("/api/whatsapp/subscriptions", requireAdmin, (req, res) => {
     const { tenantId } = req.query;
     const list = tenantId ? waSubscriptions.filter((s) => s.tenantId === tenantId) : waSubscriptions;
     res.json({ data: list });
   });
-  app.post("/api/whatsapp/subscriptions", (req, res) => {
+  app.post("/api/whatsapp/subscriptions", requireAdmin, (req, res) => {
     const { tenantId, planId } = req.body;
     const plan = waPlans.find((p) => p.id === planId);
     if (!plan) return res.status(404).json({ error: "Plan not found" });
     const start = new Date();
     const end = new Date(start); end.setMonth(end.getMonth() + 1);
     const sub = {
-      tenantId,
-      planId,
-      status: "active",
-      price: plan.monthlyPrice,
-      billingCycle: "monthly",
-      subscriptionStart: start.toISOString(),
-      subscriptionEnd: end.toISOString(),
-      messageLimit: plan.messageLimit,
-      messagesUsed: 0,
-      aiLimit: plan.aiLimit,
-      aiUsed: 0,
-      voiceMinutesLimit: plan.voiceMinutesLimit,
-      voiceMinutesUsed: 0,
-      invoiceLimit: plan.invoiceLimit,
-      invoicesUsed: 0,
-      automationLimit: plan.automationLimit,
-      automationsUsed: 0,
+      tenantId, planId, status: "active", price: plan.monthlyPrice, billingCycle: "monthly",
+      subscriptionStart: start.toISOString(), subscriptionEnd: end.toISOString(),
+      messageLimit: plan.messageLimit, messagesUsed: 0, aiLimit: plan.aiLimit, aiUsed: 0,
+      voiceMinutesLimit: plan.voiceMinutesLimit, voiceMinutesUsed: 0,
+      invoiceLimit: plan.invoiceLimit, invoicesUsed: 0, automationLimit: plan.automationLimit, automationsUsed: 0,
     };
     const existing = waSubscriptions.findIndex((s) => s.tenantId === tenantId);
     if (existing >= 0) waSubscriptions[existing] = sub; else waSubscriptions.push(sub);
@@ -767,7 +747,7 @@ async function startServer() {
     save();
     res.status(201).json({ data: sub });
   });
-  app.patch("/api/whatsapp/subscriptions/:tenantId", (req, res) => {
+  app.patch("/api/whatsapp/subscriptions/:tenantId", requireAdmin, (req, res) => {
     const i = waSubscriptions.findIndex((s) => s.tenantId === req.params.tenantId);
     if (i === -1) return res.status(404).json({ error: "Subscription not found" });
     waSubscriptions[i] = { ...waSubscriptions[i], ...req.body };
@@ -776,13 +756,13 @@ async function startServer() {
     res.json({ data: waSubscriptions[i] });
   });
 
-  // Accounts / connections
-  app.get("/api/whatsapp/accounts", (req, res) => {
+  // Accounts / connections — admin only
+  app.get("/api/whatsapp/accounts", requireAdmin, (req, res) => {
     const { tenantId } = req.query;
     const list = tenantId ? waAccounts.filter((a) => a.tenantId === tenantId) : waAccounts;
     res.json({ data: list });
   });
-  app.put("/api/whatsapp/accounts/:tenantId", (req, res) => {
+  app.put("/api/whatsapp/accounts/:tenantId", requireAdmin, (req, res) => {
     const tenantId = req.params.tenantId;
     const i = waAccounts.findIndex((a) => a.tenantId === tenantId);
     const account = {
@@ -801,26 +781,26 @@ async function startServer() {
     res.json({ data: account });
   });
 
-  // Usage
+  // Usage — tenant sees own; admin sees all
   app.get("/api/whatsapp/usage", (req, res) => {
-    const { tenantId } = req.query;
-    const list = tenantId ? waUsage.filter((u) => u.tenantId === tenantId) : waUsage;
+    const tid = req.session!.role === "tenant" ? req.session!.tenantId : (req.query.tenantId as string | undefined);
+    const list = tid ? waUsage.filter((u) => u.tenantId === tid) : waUsage;
     res.json({ data: list });
   });
-  app.post("/api/whatsapp/usage/:tenantId/increment", (req, res) => {
+  app.post("/api/whatsapp/usage/:tenantId/increment", requireAdmin, (req, res) => {
     const u = waUsage.find((x) => x.tenantId === req.params.tenantId);
     if (u) Object.assign(u, req.body);
     save();
     res.json({ data: u });
   });
 
-  // Feature overrides
-  app.get("/api/whatsapp/overrides", (req, res) => {
+  // Feature overrides — admin only
+  app.get("/api/whatsapp/overrides", requireAdmin, (req, res) => {
     const { tenantId } = req.query;
     const list = tenantId ? waOverrides.filter((o) => o.tenantId === tenantId) : waOverrides;
     res.json({ data: list });
   });
-  app.post("/api/whatsapp/overrides", (req, res) => {
+  app.post("/api/whatsapp/overrides", requireAdmin, (req, res) => {
     const ov = { id: `ov-${Date.now()}`, date: new Date().toISOString(), ...req.body };
     waOverrides.push(ov);
     addAudit({ tenantId: ov.tenantId, actor: ov.adminActor || "Super Admin", action: ov.granted ? "feature.granted" : "feature.revoked", detail: ov.feature });
@@ -828,8 +808,8 @@ async function startServer() {
     res.status(201).json({ data: ov });
   });
 
-  // Audit logs
-  app.get("/api/whatsapp/audit", (req, res) => {
+  // Audit logs — admin only
+  app.get("/api/whatsapp/audit", requireAdmin, (req, res) => {
     const { tenantId } = req.query;
     const list = tenantId ? auditLogs.filter((a) => a.tenantId === tenantId || a.tenantId === "platform") : auditLogs;
     res.json({ data: list });
@@ -837,6 +817,10 @@ async function startServer() {
 
   // Centralized entitlement check endpoint (backend authorization layer)
   app.get("/api/whatsapp/entitlement/:tenantId", (req, res) => {
+    // Tenants may only query their own tenant. Admin may query any.
+    if (req.session!.role === "tenant" && req.params.tenantId !== req.session!.tenantId) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
     const { feature } = req.query;
     const sub = waSubscriptions.find((s) => s.tenantId === req.params.tenantId);
     const plan = sub && waPlans.find((p) => p.id === sub.planId);
@@ -849,10 +833,8 @@ async function startServer() {
     res.json({ allowed: Boolean(allowed), blocked: isServiceBlocked(sub) });
   });
 
-  // Webhook simulation endpoint (voice -> transcription -> invoice pipeline)
-  // NOTE: real WhatsApp/AI connectivity requires credentials; this endpoint
-  // demonstrates the protected workflow + entitlement gating + usage tracking.
-  app.post("/api/whatsapp/webhook/:tenantId", async (req, res) => {
+  // Webhook simulation endpoint (admin only; demonstrates protected workflow)
+  app.post("/api/whatsapp/webhook/:tenantId", requireAdmin, async (req, res) => {
     const tenantId = req.params.tenantId;
     const sub = waSubscriptions.find((s) => s.tenantId === tenantId);
     const plan = sub && waPlans.find((p) => p.id === sub.planId);
@@ -869,7 +851,6 @@ async function startServer() {
       addAudit({ tenantId, actor: "System", action: "webhook.blocked", detail: gate.reason || "not entitled" });
       return res.status(403).json({ error: gate.reason || "Not entitled" });
     }
-    // Track usage
     if (usage) {
       if (isVoice) { usage.voiceMessages += 1; usage.voiceMinutes += Number(req.body?.durationSeconds || 0) / 60; }
       else { usage.aiConversations += 1; usage.outgoingMessages += 1; usage.incomingMessages += 1; }
@@ -890,15 +871,18 @@ async function startServer() {
   app.get("/api/notifications", (req, res) => {
     const { tenantId, scope } = req.query as { tenantId?: string; scope?: string };
     if (scope === "platform") {
-      // Admin center: only platform/admin-level events, never tenant operations.
+      // Admin center only — require admin.
+      if (req.session!.role !== "super_admin") return res.status(403).json({ error: "Forbidden" });
       const list = notifications.filter((n) => n.tenantId === "platform");
       return res.json({ data: list });
     }
-    const list = tenantId ? notifications.filter((n) => n.tenantId === tenantId) : notifications;
+    // Tenant sees only their own notifications.
+    const tid = req.session!.role === "tenant" ? req.session!.tenantId : (tenantId as string | undefined);
+    const list = tid ? notifications.filter((n) => n.tenantId === tid) : (req.session!.role === "super_admin" ? notifications : []);
     res.json({ data: list });
   });
 
-  app.post("/api/notifications", (req, res) => {
+  app.post("/api/notifications", requireAdmin, (req, res) => {
     const entry = { id: `ntf-${Date.now()}`, time: "just now", ...req.body };
     notifications.unshift(entry);
     if (notifications.length > 500) notifications.length = 500;
@@ -907,12 +891,13 @@ async function startServer() {
   });
 
   app.get("/api/activity-logs", (req, res) => {
-    const { tenantId } = req.query;
-    const list = tenantId ? activityLogs.filter((a) => a.tenantId === tenantId) : activityLogs;
+    // Tenant sees only own; admin sees all.
+    const tid = req.session!.role === "tenant" ? req.session!.tenantId : (req.query.tenantId as string | undefined);
+    const list = tid ? activityLogs.filter((a) => a.tenantId === tid) : activityLogs;
     res.json({ data: list });
   });
 
-  app.post("/api/activity-logs", (req, res) => {
+  app.post("/api/activity-logs", requireAdmin, (req, res) => {
     const entry = { id: `act-${Date.now()}`, timestamp: new Date().toISOString(), ...req.body };
     activityLogs.unshift(entry);
     if (activityLogs.length > 500) activityLogs.length = 500;
@@ -920,17 +905,21 @@ async function startServer() {
     res.status(201).json({ data: entry });
   });
 
-  // Plan upgrade requests (tenant submits payment; admin verifies)
-  app.get("/api/upgrade-requests", (req, res) => {
+  // Plan upgrade requests
+  app.get("/api/upgrade-requests", requireAdmin, (req, res) => {
     const { tenantId } = req.query;
     const list = tenantId ? upgradeRequests.filter((r) => r.tenantId === tenantId) : upgradeRequests;
     res.json({ data: list });
   });
   app.post("/api/upgrade-requests", (req, res) => {
+    // Tenant submits their own request; force tenantId from session.
+    const tid = req.session!.tenantId;
+    if (!tid) return res.status(403).json({ error: "Forbidden" });
     const ref = `UPG-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${String(upgradeRequests.length + 1).padStart(5, "0")}`;
     const reqEntry = {
       id: `upg-${Date.now()}`,
       reference: ref,
+      tenantId: tid,
       status: "pending",
       createdAt: new Date().toISOString(),
       ...req.body,
@@ -940,7 +929,7 @@ async function startServer() {
       id: `ntf-admin-${Date.now()}`,
       tenantId: "platform",
       title: "New plan upgrade request",
-      desc: `${req.body.tenantName || req.body.tenantId} requested ${req.body.requestedPlanName || "a plan upgrade"} (${ref}).`,
+      desc: `${req.body.tenantName || tid} requested ${req.body.requestedPlanName || "a plan upgrade"} (${ref}).`,
       time: "just now",
       icon: "alert",
       link: { tab: "admin-whatsapp" },
@@ -948,7 +937,7 @@ async function startServer() {
     save();
     res.status(201).json({ data: reqEntry });
   });
-  app.patch("/api/upgrade-requests/:id", (req, res) => {
+  app.patch("/api/upgrade-requests/:id", requireAdmin, (req, res) => {
     const i = upgradeRequests.findIndex((r) => r.id === req.params.id);
     if (i === -1) return res.status(404).json({ error: "Request not found" });
     upgradeRequests[i] = { ...upgradeRequests[i], ...req.body };
@@ -957,18 +946,18 @@ async function startServer() {
     res.json({ data: upgradeRequests[i] });
   });
 
-  // Admin payment / bank details
-  app.get("/api/payment-settings", (req, res) => {
+  // Admin payment / bank details — admin only
+  app.get("/api/payment-settings", requireAdmin, (req, res) => {
     res.json({ data: paymentSettings });
   });
-  app.patch("/api/payment-settings", (req, res) => {
+  app.patch("/api/payment-settings", requireAdmin, (req, res) => {
     Object.assign(paymentSettings, req.body);
     save();
     res.json({ data: paymentSettings });
   });
 
   // Sound event hook (the frontend plays sounds; this records the event server-side)
-  app.post("/api/sound-events", (req, res) => {
+  app.post("/api/sound-events", requireAdmin, (req, res) => {
     addAudit({ tenantId: req.body?.tenantId || "platform", actor: "System", action: "sound.played", detail: req.body?.event || "unknown" });
     save();
     res.json({ ok: true });

@@ -25,6 +25,7 @@ import { Customer, Invoice } from '../types';
 import { AddCustomerModal } from './AddCustomerModal';
 import { SendInvoiceModal } from './SendInvoiceModal';
 import { statusBadgeClass } from '../utils/invoiceStatus';
+import { apiFetch } from "./lib/api";
 
 interface CustomersViewProps {
   customers: Customer[];

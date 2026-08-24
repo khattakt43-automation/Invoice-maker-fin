@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { MessageSquare, Phone, Lock, CheckCircle2, AlertTriangle, BarChart3, Activity } from 'lucide-react';
 import { WhatsAppSubscription, WhatsAppAccount, WhatsAppUsage, WhatsAppPlan } from '../types';
+import { apiFetch } from "./lib/api";
 
 interface WhatsAppTenantViewProps {
   tenantId: string;

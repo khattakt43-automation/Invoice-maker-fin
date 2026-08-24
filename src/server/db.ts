@@ -25,6 +25,7 @@
 import fs from "fs";
 import path from "path";
 import Database from "better-sqlite3";
+import bcrypt from "bcryptjs";
 import {
   initialTenants,
   initialCustomers,
@@ -328,6 +329,19 @@ function ensureStore(): StoreShape {
   }
 
   store = loadFromDb();
+  // Migrate any plaintext tenant passwords to bcrypt hashes (one-time, in place).
+  // Detect plaintext by the absence of the bcrypt marker ($2). New accounts are
+  // always stored hashed; this only fixes legacy/restored data.
+  let pwdMigrated = false;
+  for (const t of store.tenants) {
+    if (t.password && !String(t.password).startsWith("$2")) {
+      try {
+        t.password = bcrypt.hashSync(t.password, 12);
+        pwdMigrated = true;
+      } catch { /* ignore */ }
+    }
+  }
+  if (pwdMigrated) persistToDb(store);
   return store;
 }
 

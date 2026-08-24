@@ -18,7 +18,8 @@ interface AuthSignInViewProps {
   tenants: Tenant[];
   adminConfig?: SuperAdminConfig;
   initialMode?: 'tenant' | 'super_admin';
-  onSignInSuccess: (role: UserRole, tenant?: Tenant) => void;
+  // Server-driven login: returns { ok, error } so the view can show server errors.
+  onLogin: (username: string, password: string, mode: 'tenant' | 'super_admin') => Promise<{ ok: boolean; error?: string }>;
   onBackToApp?: () => void;
 }
 
@@ -26,7 +27,7 @@ export const AuthSignInView: React.FC<AuthSignInViewProps> = ({
   tenants,
   adminConfig,
   initialMode = 'tenant',
-  onSignInSuccess,
+  onLogin,
   onBackToApp,
 }) => {
   const [authMode, setAuthMode] = useState<'tenant' | 'super_admin'>(initialMode);
@@ -40,66 +41,15 @@ export const AuthSignInView: React.FC<AuthSignInViewProps> = ({
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [rememberMe, setRememberMe] = useState(true);
 
-  const handleSignIn = (e: React.FormEvent) => {
+  const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage('');
     setIsSigningIn(true);
-
-    setTimeout(() => {
-      const trimmedUser = username.trim().toLowerCase();
-      const trimmedPass = password.trim();
-
-      if (authMode === 'tenant') {
-        const matched = tenants.find((t) => {
-          const uMatch =
-            (t.username && t.username.toLowerCase() === trimmedUser) ||
-            t.code.toLowerCase() === trimmedUser ||
-            t.adminEmail.toLowerCase() === trimmedUser ||
-            t.name.toLowerCase() === trimmedUser;
-
-          const pMatch = !t.password || t.password === trimmedPass || trimmedPass === 'Password123!';
-          return uMatch && pMatch;
-        });
-
-        if (matched) {
-          if (!matched.accessEnabled) {
-            setErrorMessage('This tenant workspace has been suspended. Please contact support.');
-            setIsSigningIn(false);
-            return;
-          }
-          setIsSigningIn(false);
-          onSignInSuccess('business_admin', matched);
-        } else {
-          setIsSigningIn(false);
-          setErrorMessage('Invalid tenant username or password.');
-        }
-      } else {
-        // Super Admin
-        const expectedUser = (adminConfig?.username || 'superadmin').toLowerCase();
-        const expectedEmail = (adminConfig?.email || 'admin@malaysiainvoice.my').toLowerCase();
-        const expectedPass = adminConfig?.password || 'Admin123!';
-
-        const isUserMatch =
-          trimmedUser === expectedUser ||
-          trimmedUser === expectedEmail ||
-          trimmedUser === 'superadmin' ||
-          trimmedUser === 'admin' ||
-          trimmedUser === 'sa';
-
-        const isPassMatch =
-          trimmedPass === expectedPass ||
-          trimmedPass === 'Admin123!' ||
-          trimmedPass === 'Password123!';
-
-        if (isUserMatch && isPassMatch) {
-          setIsSigningIn(false);
-          onSignInSuccess('super_admin');
-        } else {
-          setIsSigningIn(false);
-          setErrorMessage('Invalid Super Admin credentials.');
-        }
-      }
-    }, 400);
+    const result = await onLogin(username.trim(), password, authMode);
+    setIsSigningIn(false);
+    if (!result.ok) {
+      setErrorMessage(result.error || 'Invalid credentials.');
+    }
   };
 
   return (

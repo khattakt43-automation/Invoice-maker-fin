@@ -19,6 +19,7 @@ import {
 import { Invoice } from '../types';
 import { SendInvoiceModal } from './SendInvoiceModal';
 import { statusBadgeClass } from '../utils/invoiceStatus';
+import { apiFetch } from "./lib/api";
 
 interface InvoicesListViewProps {
   invoices: Invoice[];

@@ -19,13 +19,13 @@ import { Tenant } from '../types';
 
 interface TenantSignInViewProps {
   tenants: Tenant[];
-  onSignInSuccess: (tenant: Tenant) => void;
+  onLogin: (username: string, password: string, mode: 'tenant' | 'super_admin') => Promise<{ ok: boolean; error?: string }>;
   onBackToPlatform?: () => void;
 }
 
 export const TenantSignInView: React.FC<TenantSignInViewProps> = ({
   tenants,
-  onSignInSuccess,
+  onLogin,
   onBackToPlatform,
 }) => {
   const [usernameInput, setUsernameInput] = useState('');
@@ -35,54 +35,20 @@ export const TenantSignInView: React.FC<TenantSignInViewProps> = ({
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [rememberMe, setRememberMe] = useState(true);
 
-  const handleSignIn = (e: React.FormEvent) => {
+  const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage('');
     setIsSigningIn(true);
-
-    setTimeout(() => {
-      const trimmedUser = usernameInput.trim().toLowerCase();
-      const trimmedPass = passwordInput.trim();
-
-      // Find tenant matching username, code, or email
-      const matched = tenants.find((t) => {
-        const uMatch =
-          (t.username && t.username.toLowerCase() === trimmedUser) ||
-          t.code.toLowerCase() === trimmedUser ||
-          t.adminEmail.toLowerCase() === trimmedUser ||
-          t.name.toLowerCase() === trimmedUser;
-
-        const pMatch = !t.password || t.password === trimmedPass || trimmedPass === 'Password123!';
-        return uMatch && pMatch;
-      });
-
-      if (matched) {
-        if (!matched.accessEnabled) {
-          setErrorMessage('This tenant workspace account has been suspended or deactivated. Please contact platform support.');
-          setIsSigningIn(false);
-          return;
-        }
-        setIsSigningIn(false);
-        onSignInSuccess(matched);
-      } else {
-        setIsSigningIn(false);
-        setErrorMessage('Invalid username or password. You can also pick one of the demo tenant logins below.');
-      }
-    }, 450);
-  };
-
-  const handleQuickLogin = (tenant: Tenant) => {
-    setUsernameInput(tenant.username || tenant.code);
-    setPasswordInput(tenant.password || 'Password123!');
-    setErrorMessage('');
-    onSignInSuccess(tenant);
+    const result = await onLogin(usernameInput.trim(), passwordInput, 'tenant');
+    setIsSigningIn(false);
+    if (!result.ok) setErrorMessage(result.error || 'Invalid username or password.');
   };
 
   return (
     <div className="min-h-[85vh] flex items-center justify-center p-4 sm:p-6 lg:p-8">
       <div className="w-full max-w-4xl grid grid-cols-1 lg:grid-cols-12 gap-8 items-center">
         
-        {/* Left Side: Brand Story & Demo Credentials */}
+        {/* Left Side: Brand Story */}
         <div className="lg:col-span-5 space-y-6">
           <div>
             {onBackToPlatform && (
@@ -110,43 +76,17 @@ export const TenantSignInView: React.FC<TenantSignInViewProps> = ({
           <div className="p-4 bg-white rounded-2xl border border-[#bdcac0]/60 shadow-xs space-y-3">
             <div className="flex items-center gap-2 text-xs font-bold text-[#006a46] uppercase tracking-wider">
               <Sparkles className="w-4 h-4 text-[#00855a]" />
-              <span>1-Click Demo Tenant Sign-In</span>
+              <span>Secure Tenant Workspace</span>
             </div>
             <p className="text-xs text-[#545f73]">
-              Click any provisioned Malaysian corporate tenant below to authenticate instantly:
+              Sign in with your corporate username or tenant ID. Access is scoped to your own
+              organization and protected by server-side authentication.
             </p>
-
-            <div className="space-y-2 pt-1">
-              {tenants.slice(0, 4).map((t) => (
-                <button
-                  key={t.id}
-                  type="button"
-                  onClick={() => handleQuickLogin(t)}
-                  className="w-full text-left p-2.5 rounded-xl border border-[#bdcac0]/60 hover:border-[#006a46] hover:bg-[#eff4ff] transition-all flex items-center justify-between group cursor-pointer bg-[#f8f9ff]"
-                >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <div className="w-7 h-7 rounded-lg bg-[#00855a] text-white flex items-center justify-center font-mono font-bold text-xs shrink-0">
-                      {t.initials}
-                    </div>
-                    <div className="min-w-0">
-                      <p className="font-bold text-xs text-[#0b1c30] truncate">{t.name}</p>
-                      <p className="text-[11px] font-mono text-[#545f73]">
-                        ID: <span className="text-[#006a46] font-semibold">{t.username || t.code}</span>
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1 text-[11px] font-bold text-[#006a46] opacity-80 group-hover:opacity-100 shrink-0">
-                    <span>Login</span>
-                    <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
-                  </div>
-                </button>
-              ))}
-            </div>
           </div>
 
           <div className="flex items-center gap-2 text-xs text-[#545f73]">
             <ShieldCheck className="w-4 h-4 text-[#00855a] shrink-0" />
-            <span>256-Bit SSL Isolated Schema & LHDN e-Invoicing Compliance</span>
+            <span>Encrypted sessions, isolated tenant data, and audit logging</span>
           </div>
         </div>
 
@@ -195,9 +135,6 @@ export const TenantSignInView: React.FC<TenantSignInViewProps> = ({
                 <label className="block text-xs font-semibold uppercase tracking-wider text-[#3e4942]">
                   Password *
                 </label>
-                <span className="text-[11px] text-[#545f73]">
-                  Demo: <code className="text-[#006a46] font-mono font-bold">Password123!</code>
-                </span>
               </div>
               <div className="relative">
                 <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-[#545f73]">
@@ -232,17 +169,6 @@ export const TenantSignInView: React.FC<TenantSignInViewProps> = ({
                 />
                 <span>Remember this session</span>
               </label>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setUsernameInput('techadmin');
-                  setPasswordInput('Password123!');
-                }}
-                className="text-[#006a46] font-semibold hover:underline"
-              >
-                Auto-Fill Sample Login
-              </button>
             </div>
 
             <button

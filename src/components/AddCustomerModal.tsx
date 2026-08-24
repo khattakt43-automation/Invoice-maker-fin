@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Customer } from '../types';
 import { X, UserPlus, Building, Mail, Phone, MapPin, Hash } from 'lucide-react';
+import { apiFetch } from "./lib/api";
 
 interface AddCustomerModalProps {
   isOpen: boolean;

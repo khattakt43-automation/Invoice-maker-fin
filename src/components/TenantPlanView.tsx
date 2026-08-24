@@ -7,6 +7,7 @@ import {
   Info,
 } from 'lucide-react';
 import { Tenant } from '../types';
+import { apiFetch } from "./lib/api";
 
 interface TenantPlanViewProps {
   tenant: Tenant;

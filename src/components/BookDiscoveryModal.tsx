@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { RetainerPlan } from '../types';
 import { X, Sparkles, CheckCircle2, Calendar, Mail, Building, Phone } from 'lucide-react';
+import { apiFetch } from "./lib/api";
 
 interface BookDiscoveryModalProps {
   isOpen: boolean;
