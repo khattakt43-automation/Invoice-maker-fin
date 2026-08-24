@@ -142,22 +142,6 @@ function ensureStore(): StoreShape {
       for (const key of Object.keys(seeded) as (keyof StoreShape)[]) {
         if ((store as any)[key] === undefined) (store as any)[key] = (seeded as any)[key];
       }
-      // Normalize: guarantee required fields exist so no view crashes on
-      // missing data (e.g. a tenant without `currency` blanked Create Invoice).
-      if (Array.isArray((store as any).tenants)) {
-        (store as any).tenants = (store as any).tenants.map((t: any) => ({
-          ...t,
-          currency: t.currency || 'RM',
-          paperSize: t.paperSize || 'A4 (Standard)',
-        }));
-      }
-      if (Array.isArray((store as any).invoices)) {
-        (store as any).invoices = (store as any).invoices.map((iv: any) => ({
-          ...iv,
-          currency: iv.currency || 'RM',
-        }));
-      }
-      persist();
       return store;
     }
   } catch (e) {
