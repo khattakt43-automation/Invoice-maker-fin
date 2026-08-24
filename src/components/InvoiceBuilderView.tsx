@@ -399,13 +399,20 @@ export const InvoiceBuilderView: React.FC<InvoiceBuilderViewProps> = ({
     host.style.width = '100%';
     host.style.background = '#fff';
     host.style.zIndex = '2147483647';
+    // Even if afterprint never fires (e.g. print cancelled), the host must not
+    // trap pointer events or block the app UI underneath.
+    host.style.pointerEvents = 'none';
     host.appendChild(clone);
     document.body.appendChild(host);
     const cleanup = () => {
       const h = document.getElementById('print-host');
       if (h) h.remove();
       document.removeEventListener('afterprint', cleanup);
+      clearTimeout(fallback);
     };
+    // Fallback: if afterprint doesn't fire, still remove the host so it can't
+    // block the app or stack up on the next print.
+    const fallback = setTimeout(cleanup, 60000);
     document.addEventListener('afterprint', cleanup);
     setTimeout(() => { window.print(); }, 60);
   };

@@ -109,6 +109,11 @@ export function App() {
   // Derived from the server session — never from client storage (spec #16).
   const tenantIdRef = useRef<string | null>(null);
 
+  // Server roles: "tenant" | "super_admin". Frontend UserRole: "business_admin" | "super_admin".
+  // Normalize so the view gating (currentRole === 'business_admin') works for tenants.
+  const normalizeRole = (r?: string): UserRole =>
+    r === 'super_admin' ? 'super_admin' : 'business_admin';
+
   // --- Session bootstrap: derive identity from the server session (spec #1/#5).
   // No client-side auth state. On mount we ask the server who we are.
   const [authBooting, setAuthBooting] = useState(true);
@@ -116,7 +121,7 @@ export function App() {
     try {
       const { ok, data } = await apiGet<{ authenticated: boolean; role?: string; tenantId?: string; tenant?: any }>('/api/auth/me');
       if (ok && data.authenticated) {
-        setCurrentRole(data.role as UserRole);
+        setCurrentRole(normalizeRole(data.role));
         if (data.tenantId) {
           tenantIdRef.current = data.tenantId;
           if (data.tenant) {
@@ -214,7 +219,7 @@ export function App() {
       const safe = { ...data.tenant }; delete safe.password;
       setActiveTenant(safe);
     }
-    setCurrentRole(data.role);
+    setCurrentRole(normalizeRole(data.role));
     setActiveTab(data.role === 'super_admin' ? 'admin-overview' : 'create-invoice');
     setIsAuthenticated(true);
     return { ok: true };
