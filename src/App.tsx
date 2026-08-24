@@ -33,6 +33,7 @@ import { TenantSignInView } from './components/TenantSignInView';
 import { AuthSignInView } from './components/AuthSignInView';
 import { AdminProfileView } from './components/AdminProfileView';
 import { ImpersonateModal } from './components/ImpersonateModal';
+import RoleSwitchGateModal from './components/RoleSwitchGateModal';
 import { SupportModal } from './components/SupportModal';
 import { ChangesView } from './components/ChangesView';
 import { TemplatesAdminView } from './components/TemplatesAdminView';
@@ -100,6 +101,10 @@ export function App() {
   // Modals
   const [isImpersonateOpen, setIsImpersonateOpen] = useState(false);
   const [isSupportOpen, setIsSupportOpen] = useState(false);
+  // Role-switch password gate (Tenant <-> Super Admin)
+  const [isRoleGateOpen, setIsRoleGateOpen] = useState(false);
+  const [pendingRoleSwitch, setPendingRoleSwitch] = useState<'super_admin' | 'business_admin' | null>(null);
+  const [roleGateError, setRoleGateError] = useState('');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [soundsEnabled, setSoundsEnabled] = useState<boolean>(() => {
     const saved = localStorage.getItem('billah_sounds_enabled');
@@ -226,16 +231,37 @@ export function App() {
 
   // Switch Role between Business Portal and Super Admin
   const handleSwitchRole = () => {
-    if (currentRole === 'business_admin') {
+    // Both directions require a password gate. Open the modal; the actual
+    // switch only happens after the password is validated in handleRoleGateSubmit.
+    setPendingRoleSwitch(currentRole === 'business_admin' ? 'super_admin' : 'business_admin');
+    setIsRoleGateOpen(true);
+  };
+
+  // Called by the gate modal with the entered password.
+  const handleRoleGateSubmit = (entered: string) => {
+    const target = pendingRoleSwitch;
+    if (!target) return;
+    const ok =
+      target === 'super_admin'
+        ? entered === superAdminConfig.password
+        : activeTenant?.password === entered;
+    if (!ok) {
+      // Surface a generic error; keep the modal open so they can retry.
+      setRoleGateError('Incorrect password. Please try again.');
+      return;
+    }
+    // Password correct -> perform the switch.
+    if (target === 'super_admin') {
       tenantIdRef.current = null;
       setCurrentRole('super_admin');
       setActiveTab('admin-overview');
     } else {
-      // Returning to business portal: if a tenant session exists restore it,
-      // otherwise stay unauthenticated until they sign in again.
       setCurrentRole('business_admin');
       setActiveTab('dashboard');
     }
+    setIsRoleGateOpen(false);
+    setPendingRoleSwitch(null);
+    setRoleGateError('');
   };
 
   // Impersonate a specific tenant
@@ -775,6 +801,24 @@ export function App() {
         tenants={tenants}
         onSelectTenant={handleImpersonateTenant}
       />
+
+      {/* Role-switch password gate (Tenant <-> Super Admin) */}
+      <RoleSwitchGateModal
+        isOpen={isRoleGateOpen}
+        target={pendingRoleSwitch}
+        targetLabel={
+          pendingRoleSwitch === 'super_admin'
+            ? 'Super Admin'
+            : (activeTenant?.name ? `${activeTenant.name} (Tenant)` : 'Tenant Portal')
+        }
+        onSubmit={handleRoleGateSubmit}
+        onClose={() => { setIsRoleGateOpen(false); setPendingRoleSwitch(null); setRoleGateError(''); }}
+      />
+      {roleGateError && isRoleGateOpen && (
+        <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-[210] bg-red-600 text-white text-sm px-4 py-2.5 rounded-lg shadow-lg">
+          {roleGateError}
+        </div>
+      )}
 
       {/* Support Modal */}
       <SupportModal isOpen={isSupportOpen} onClose={() => setIsSupportOpen(false)} />
