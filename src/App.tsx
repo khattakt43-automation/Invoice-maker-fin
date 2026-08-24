@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Customer,
   Invoice,
@@ -110,6 +110,18 @@ export function App() {
   // --- Session + active-tab persistence (tenant login lands on Create Invoice;
   //     refresh keeps the user on the same page) ---
   const SESSION_KEY = 'billah_session_v1';
+  // Holds the tenant id chosen at LOGIN (authoritative source for "who am I").
+  // Restored from sessionStorage so a refresh restores the SAME authorized tenant
+  // and NEVER silently falls back to the first tenant in the array.
+  // NOTE: useRef does not lazy-init, so derive the initial value via useState.
+  const [initialTenantId] = useState<string | null>(() => {
+    try {
+      const s = JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null');
+      return s?.tenantId || null;
+    } catch { return null; }
+  });
+  const tenantIdRef = useRef<string | null>(initialTenantId);
+
   // Persist on any change so a refresh restores the exact page the user was on.
   useEffect(() => {
     try {
@@ -146,14 +158,16 @@ export function App() {
     setSidebarOpen(false);
   };
 
-  // Fetch initial data from backend API if available
+  // Fetch initial data from backend API; scope tenant data to the logged-in tenant
+  // and restore the SAME authorized tenant across refresh (never tenants[0]).
   useEffect(() => {
     async function loadData() {
       try {
+        const myTenantId = tenantIdRef.current;
         const [tenantsRes, custRes, invRes, prodRes, kpiRes] = await Promise.all([
           fetch('/api/tenants'),
-          fetch('/api/customers'),
-          fetch('/api/invoices'),
+          fetch(`/api/customers${myTenantId ? `?tenantId=${encodeURIComponent(myTenantId)}` : ''}`),
+          fetch(`/api/invoices${myTenantId ? `?tenantId=${encodeURIComponent(myTenantId)}` : ''}`),
           fetch('/api/products'),
           fetch('/api/kpis'),
         ]);
@@ -162,33 +176,30 @@ export function App() {
           const tData = await tenantsRes.json();
           if (tData.data?.length) {
             setTenants(tData.data);
-            // Restore the previous session (role + active tenant + active tab) so a
-            // refresh keeps the user on the exact page they were viewing. Falls back
-            // to the first tenant if no saved session exists.
-            let restoredTenant = tData.data[0];
-            try {
-              const saved = JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null');
-              if (saved?.tenantId) {
-                const match = tData.data.find((t: any) => t.id === saved.tenantId);
-                if (match) restoredTenant = match;
-              }
-              if (saved?.role) setCurrentRole(saved.role);
-              if (saved?.tab) setActiveTab(saved.tab);
-            } catch { /* ignore */ }
-            setActiveTenant(restoredTenant);
+            // Restore the exact authorized tenant (the one chosen at login),
+            // NOT the first tenant in the array.
+            const saved = myTenantId;
+            const match = saved ? tData.data.find((t: any) => t.id === saved) : undefined;
+            if (match) {
+              setActiveTenant(match);
+            } else if (!activeTenant?.id) {
+              // No saved session and not yet authenticated: leave undefined so the
+              // auth screen handles it — do NOT default to tenants[0].
+              setActiveTenant(tData.data[0]);
+            }
           }
         }
         if (custRes.ok) {
           const cData = await custRes.json();
-          if (cData.data?.length) setCustomers(cData.data);
+          setCustomers(cData.data ?? []);
         }
         if (invRes.ok) {
           const iData = await invRes.json();
-          if (iData.data?.length) setInvoices(iData.data);
+          setInvoices(iData.data ?? []);
         }
         if (prodRes.ok) {
           const pData = await prodRes.json();
-          if (pData.data?.length) setProducts(pData.data);
+          setProducts(pData.data ?? []);
         }
         if (kpiRes.ok) {
           const kData = await kpiRes.json();
@@ -216,9 +227,12 @@ export function App() {
   // Switch Role between Business Portal and Super Admin
   const handleSwitchRole = () => {
     if (currentRole === 'business_admin') {
+      tenantIdRef.current = null;
       setCurrentRole('super_admin');
       setActiveTab('admin-overview');
     } else {
+      // Returning to business portal: if a tenant session exists restore it,
+      // otherwise stay unauthenticated until they sign in again.
       setCurrentRole('business_admin');
       setActiveTab('dashboard');
     }
@@ -226,6 +240,7 @@ export function App() {
 
   // Impersonate a specific tenant
   const handleImpersonateTenant = (tenant: Tenant) => {
+    tenantIdRef.current = tenant.id;
     setActiveTenant(tenant);
     setCurrentRole('business_admin');
     setActiveTab('dashboard');
@@ -235,6 +250,7 @@ export function App() {
   // Sign out handler
   const handleLogout = () => {
     setIsAuthenticated(false);
+    tenantIdRef.current = null; // clear previous tenant context (no stale reuse)
   };
 
   // Sign in handler
@@ -242,13 +258,16 @@ export function App() {
     setIsAuthenticated(true);
     setCurrentRole(role);
     if (role === 'business_admin' && tenant) {
+      tenantIdRef.current = tenant.id; // authoritative: the logged-in tenant
       setActiveTenant(tenant);
       // Tenant users land directly on Create Invoice (their primary action).
       setActiveTab('create-invoice');
     } else if (role === 'super_admin') {
+      tenantIdRef.current = null; // super admin is not a single tenant
       setActiveTab('admin-overview');
     } else {
       // Non-impersonated tenant keeps dashboard fallback for safety.
+      tenantIdRef.current = tenant?.id ?? null;
       setActiveTab('create-invoice');
     }
   };
@@ -369,10 +388,11 @@ export function App() {
     );
 
     // Refresh customers so a newly auto-created customer (billed for the first
-    // time on an invoice) shows up in the Customers list immediately.
-    fetch('/api/customers')
+    // time on an invoice) shows up in the Customers list immediately. Scope to
+    // the active tenant so other tenants' customers never appear.
+    fetch(`/api/customers?tenantId=${encodeURIComponent(activeTenant.id)}`)
       .then((r) => (r.ok ? r.json() : null))
-      .then((d) => { if (d?.data?.length) setCustomers(d.data); })
+      .then((d) => { if (d?.data) setCustomers(d.data); })
       .catch(() => {});
 
     // Sound + activity log (Points 7 & 9)

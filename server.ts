@@ -19,7 +19,8 @@ async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 
-  app.use(express.json());
+  app.use(express.json({ limit: '25mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
   // Persistent data store (write-through JSON file). This is the single source
   // of truth: every mutation is persisted immediately and reads always reflect

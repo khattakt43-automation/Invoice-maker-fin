@@ -168,3 +168,43 @@ User requests:
 screenshot. First tenant is now `Admin Note Test Co`. (Note: the currency-normalization db fix
 from the reverted round is intentionally NOT reapplied — only the requested login/refresh behavior
 was changed here.)
+
+## Multi-tenant isolation + settings persistence (root-cause fixes)
+
+Investigated and fixed two critical multi-tenant bugs from the master prompt.
+
+### Bug 1 — Refresh switched to another tenant (root cause: `useRef(() => ...)`)
+`useRef` does NOT lazy-initialize — `useRef(() => {...})` stored the *function* as
+`.current`, not the saved tenant id. After a refresh `tenantIdRef.current` was a function
+(truthy but not an id), so `loadData` fell back to `tenants[0]`. Also the active tenant was
+restored from a `sessionStorage` value that the mount-time persist effect could clobber with
+`initialTenants[0]`.
+Fix:
+- Derive the saved tenant id via `useState` lazy init, pass to `useRef` (`App.tsx`).
+- `loadData` now restores the EXACT authorized tenant from `tenantIdRef` (the one chosen at
+  login) and NEVER defaults to `tenants[0]`. If there is no saved session it leaves the
+  tenant unselected so the auth screen handles it.
+- `handleSignIn`/`handleImpersonateTenant`/`handleSwitchRole` set `tenantIdRef.current`;
+  `handleLogout` clears it (no stale reuse).
+- `loadData` now scopes `/api/invoices` and `/api/customers` by `?tenantId=...`; the
+  invoice-saved customer re-fetch is also scoped. Dashboard/Reports now only show the
+  logged-in tenant's data (real isolation, not just frontend filtering).
+
+### Bug 2 — Tenant settings / logo disappeared after logout/login (root cause: 413)
+`app.use(express.json())` had the default **100kb** body limit. A base64 logo PNG exceeds it,
+so the PATCH returned **413 Payload Too Large** and was silently swallowed — the logo never
+reached the server. On logout/login the server returned the tenant without the logo.
+Fix:
+- Raised body-parser limit to 25mb (`express.json({ limit: '25mb' })`).
+- `TenantSettingsView.handleSave` now checks the PATCH response and shows a real
+  **"Save failed"** banner on HTTP error instead of always claiming success (spec 16).
+- Added a sync effect so the settings form always reflects the latest server record after a
+  save / refresh (spec 17) — fixes the case where a fast refresh showed stale initial state.
+
+Verified via Playwright + API:
+- Login as non-first tenant → refresh → stays on that tenant (no switch to tenants[0]).
+- Switch tenant → refresh → stays on new tenant.
+- Tenant A refresh never loads Tenant B; invoices/customers API are scoped by tenantId.
+- Save invoice title → refresh → persists; logout/login → persists.
+- Upload base64 logo → refresh → logo persists (written to store.json).
+- Cross-tenant isolation: Acme invoices are all tenantId=Acme; Maya all tenantId=Maya.

@@ -1,10 +1,11 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Upload,
   Building,
   Image as ImageIcon,
   Check,
   CheckCircle2,
+  AlertCircle,
   Trash2,
   FileText,
   CreditCard,
@@ -45,6 +46,7 @@ export const TenantSettingsView: React.FC<TenantSettingsViewProps> = ({
     tenant.logoUrl || tenant.customerLogoUrl
   );
   const [isSaved, setIsSaved] = useState(false);
+  const [isError, setIsError] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -155,21 +157,47 @@ export const TenantSettingsView: React.FC<TenantSettingsViewProps> = ({
 
   const handleSave = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
+    setIsError(false);
     onUpdateTenant(formData);
 
     try {
-      await fetch(`/api/tenants/${formData.id}`, {
+      const res = await fetch(`/api/tenants/${formData.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(formData),
       });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setIsSaved(true);
+      setTimeout(() => setIsSaved(false), 3500);
     } catch (err) {
-      console.log('Saved in local state');
+      // Surface a real failure instead of pretending the save succeeded.
+      console.error('Tenant settings save failed', err);
+      setIsError(true);
+      setTimeout(() => setIsError(false), 5000);
     }
-
-    setIsSaved(true);
-    setTimeout(() => setIsSaved(false), 3500);
   };
+
+  // Keep form in sync with the tenant prop (refreshed from the server after a
+  // save and on session restore). Without this a fast refresh could show stale
+  // initial state. The tenant prop only changes on legitimate events (save /
+  // logout-login / refresh), never mid-keystroke, so it is safe to re-sync.
+  useEffect(() => {
+    setFormData((prev) => {
+      if (prev.id !== tenant.id) {
+        return {
+          ...tenant,
+          username: tenant.username || tenant.adminEmail.split('@')[0] || 'tenantadmin',
+          password: tenant.password || 'Password123!',
+          logoHeight: tenant.logoHeight || 52,
+          invoiceTitle: tenant.invoiceTitle || 'Tax Invoice',
+        };
+      }
+      const merged = { ...tenant };
+      if (!merged.password) merged.password = prev.password || 'Password123!';
+      return merged;
+    });
+    setLogoPreview(tenant.logoUrl || tenant.customerLogoUrl);
+  }, [tenant]);
 
   return (
     <div id="tenant-settings-view" className="p-6 lg:p-8 max-w-5xl mx-auto space-y-8">
@@ -205,12 +233,19 @@ export const TenantSettingsView: React.FC<TenantSettingsViewProps> = ({
           id="top-save-tenant-settings-btn"
           onClick={() => handleSave()}
           className={`px-6 py-2.5 rounded-xl font-semibold text-sm flex items-center gap-2 transition-all shadow-sm active:scale-95 shrink-0 ${
-            isSaved
+            isError
+              ? 'bg-red-600 text-white ring-2 ring-red-400/50'
+              : isSaved
               ? 'bg-emerald-600 text-white ring-2 ring-emerald-400/50 shadow-emerald-200'
               : 'bg-[#006a46] text-white hover:bg-[#00855a]'
           }`}
         >
-          {isSaved ? (
+          {isError ? (
+            <>
+              <AlertCircle className="w-4 h-4 text-red-100" />
+              <span>Save failed</span>
+            </>
+          ) : isSaved ? (
             <>
               <CheckCircle2 className="w-4 h-4 text-emerald-100 animate-bounce" />
               <span>Saved Successfully!</span>
@@ -223,6 +258,20 @@ export const TenantSettingsView: React.FC<TenantSettingsViewProps> = ({
           )}
         </button>
       </div>
+
+      {isError && (
+        <div className="p-4 bg-red-50 border border-red-300 text-red-900 rounded-xl text-xs font-semibold flex items-center gap-3 animate-fade-in shadow-xs">
+          <div className="w-7 h-7 rounded-full bg-red-600 text-white flex items-center justify-center shrink-0">
+            <AlertCircle className="w-4 h-4" />
+          </div>
+          <div>
+            <p className="font-bold text-red-900">Save failed</p>
+            <p className="text-red-700 font-normal mt-0.5">
+              The server rejected the update. Please check your connection and try again. Your changes were not saved.
+            </p>
+          </div>
+        </div>
+      )}
 
       {isSaved && (
         <div className="p-4 bg-emerald-50 border border-emerald-300 text-emerald-900 rounded-xl text-xs font-semibold flex items-center gap-3 animate-fade-in shadow-xs">
