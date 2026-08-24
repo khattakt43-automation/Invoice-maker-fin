@@ -45,7 +45,15 @@ import { playSound } from './utils/sound';
 
 export function App() {
   // App state
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(true);
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
+    // Default landing = sign-in screen. A returning, still-valid session
+    // (set by handleSignIn / refresh) restores automatically; everyone else
+    // lands on the Tenant Sign-In screen.
+    try {
+      const s = JSON.parse(sessionStorage.getItem('billah_session_v1') || 'null');
+      return !!(s && (s.role === 'super_admin' || s.role === 'business_admin'));
+    } catch { return false; }
+  });
   const [currentRole, setCurrentRole] = useState<UserRole>(() => {
     try {
       const s = JSON.parse(sessionStorage.getItem('billah_session_v1') || 'null');
@@ -277,6 +285,8 @@ export function App() {
   const handleLogout = () => {
     setIsAuthenticated(false);
     tenantIdRef.current = null; // clear previous tenant context (no stale reuse)
+    // Clear the persisted session so a fresh visit lands on the sign-in screen.
+    try { sessionStorage.removeItem('billah_session_v1'); } catch { /* ignore */ }
   };
 
   // Sign in handler
